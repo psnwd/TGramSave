@@ -1,6 +1,6 @@
 # TGramSave
 
-**Modern Telegram Web media downloader** — a browser extension that adds one-click download buttons for videos, images, and documents directly inside [web.telegram.org](https://web.telegram.org), plus a popup for batch downloads and whole-channel scraping.
+**Modern Telegram Web media downloader** - a browser extension that adds one-click download buttons for videos, images, and documents directly inside [web.telegram.org](https://web.telegram.org), plus a popup for batch downloads and whole-channel scraping.
 
 > Unofficial. Not affiliated with, endorsed by, or connected to Telegram FZ-LLC in any way.
 
