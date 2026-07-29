@@ -1,0 +1,231 @@
+/**
+ * TGramSave popup theme — tokens adapted from .dev/DESIGN.md (Wise-inspired
+ * system): lime-green CTA accent, sage-tinted canvas, near-black ink, Inter
+ * type, generous 24px-radius cards/buttons. Scaled down from the source
+ * system's marketing hero scale to this popup's compact UI chrome.
+ *
+ * Dark mode follows the DESIGN.md "polarity-flipped" pattern documented for
+ * `hero-band-dark` / `card-feature-dark`: near-black surfaces with the same
+ * lime green carried through as the accent, rather than inventing a new palette.
+ */
+:root,
+:root[data-theme="light"] {
+  --color-primary: #9fe870;
+  --color-primary-active: #cdffad;
+  --color-primary-neutral: #c5edab;
+  --color-primary-pale: #e2f6d5;
+
+  --color-canvas: #ffffff;
+  --color-canvas-soft: #e8ebe6;
+
+  --color-ink: #0e0f0c;
+  --color-body: #454745;
+  --color-mute: #868685;
+  --color-border: #d7dad4;
+
+  --color-positive: #2ead4b;
+  --color-positive-deep: #054d28;
+  --color-positive-bg: #eaf7ee;
+  --color-warning: #ffd11a;
+  --color-warning-content: #4a3b1c;
+  --color-warning-bg: #fff8dd;
+  --color-negative: #d03238;
+  --color-negative-deep: #a72027;
+  --color-negative-bg: #fdf1f1;
+  --color-negative-border: #f2c9cb;
+
+  /* Fixed (not theme-flipped): text sitting on the lime CTA fill must stay dark in both themes — --color-ink flips to near-white in dark mode and would otherwise wash out on green. */
+  --color-on-primary: #0e0f0c;
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --color-primary: #9fe870;
+  --color-primary-active: #b9f797;
+  --color-primary-neutral: #3d5a2c;
+  --color-primary-pale: #1e3315;
+
+  --color-canvas: #171814;
+  --color-canvas-soft: #0e0f0c;
+
+  --color-ink: #f3f5f0;
+  --color-body: #c2c4bf;
+  --color-mute: #83857f;
+  --color-border: #33352f;
+
+  --color-positive: #4bc774;
+  --color-positive-deep: #bdf0cd;
+  --color-positive-bg: #142a1c;
+  --color-warning: #ffd11a;
+  --color-warning-content: #ffe9a3;
+  --color-warning-bg: #332c0e;
+  --color-negative: #ff6b70;
+  --color-negative-deep: #ffd0d2;
+  --color-negative-bg: #331314;
+  --color-negative-border: #5c2226;
+
+  --color-on-primary: #0e0f0c;
+
+  color-scheme: dark;
+}
+
+:root {
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-xl: 24px;
+  --radius-pill: 9999px;
+
+  --space-xxs: 2px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+
+  --font-body: "Inter", -apple-system, "Segoe UI", sans-serif;
+
+  /* Element Plus theme hooks — see https://element-plus.org/en-US/guide/theming */
+  --el-color-primary: var(--color-primary);
+  --el-color-primary-light-3: var(--color-primary-neutral);
+  --el-color-primary-light-5: var(--color-primary-neutral);
+  --el-color-primary-light-7: var(--color-primary-pale);
+  --el-color-primary-light-8: var(--color-primary-pale);
+  --el-color-primary-light-9: var(--color-primary-pale);
+  --el-color-primary-dark-2: var(--color-ink);
+  --el-color-success: var(--color-positive);
+  --el-color-warning: var(--color-warning);
+  --el-color-danger: var(--color-negative);
+  --el-border-radius-base: var(--radius-md);
+  --el-border-radius-round: var(--radius-pill);
+  --el-border-radius-small: var(--radius-sm);
+  --el-font-family: var(--font-body);
+  --el-text-color-primary: var(--color-ink);
+  --el-text-color-regular: var(--color-body);
+  --el-text-color-secondary: var(--color-mute);
+  --el-border-color: var(--color-ink);
+  --el-border-color-light: var(--color-border);
+  --el-fill-color-blank: var(--color-canvas);
+  --el-bg-color: var(--color-canvas);
+  --el-bg-color-overlay: var(--color-canvas);
+  --el-mask-color: rgba(0, 0, 0, 0.5);
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--color-canvas-soft);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  transition: background-color 0.15s ease, color 0.15s ease;
+  /* Reserve the scrollbar's width up front so its appearance/disappearance
+     (e.g. Chrome's popup max-height being hit) never shifts the layout. */
+  scrollbar-gutter: stable;
+  overflow-x: hidden;
+}
+
+/* ── Buttons: lime-green pill CTA is the brand's signature ───────────────── */
+.el-button {
+  border-radius: var(--radius-xl) !important;
+  font-weight: 600;
+  border-width: 1px;
+}
+.el-button--primary {
+  color: var(--color-on-primary) !important;
+  border-color: var(--color-primary) !important;
+}
+.el-button--primary:hover,
+.el-button--primary:focus {
+  background-color: var(--color-primary-active) !important;
+  border-color: var(--color-primary-active) !important;
+  color: var(--color-on-primary) !important;
+}
+.el-button--danger.is-plain {
+  color: var(--color-negative-deep) !important;
+  background: var(--color-negative-bg) !important;
+  border-color: var(--color-negative-border) !important;
+}
+.el-button.is-circle {
+  border-radius: var(--radius-pill) !important;
+}
+
+/* ── Inputs & checkboxes ──────────────────────────────────────────────────── */
+.el-input__wrapper {
+  border-radius: var(--radius-md) !important;
+  box-shadow: 0 0 0 1px var(--color-border) inset !important;
+  background: var(--color-canvas) !important;
+}
+.el-input__inner {
+  color: var(--color-ink) !important;
+}
+.el-checkbox {
+  height: auto !important;
+  align-items: flex-start !important;
+  white-space: normal !important;
+  width: 100%;
+}
+.el-checkbox__label {
+  color: var(--color-ink);
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+.el-checkbox__input {
+  margin-top: 2px;
+}
+.el-checkbox__input.is-checked .el-checkbox__inner {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+.el-checkbox__inner::after {
+  border-color: var(--color-ink);
+}
+
+/* ── Segmented nav (replaces el-tabs — never overflows at popup widths) ──── */
+.tgdl-segmented {
+  display: flex;
+  gap: 2px;
+  background: var(--color-canvas-soft);
+  padding: var(--space-xxs);
+  border-radius: var(--radius-pill);
+}
+.tgdl-segmented button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--color-body);
+  font: inherit;
+  font-weight: 600;
+  font-size: 13px;
+  padding: var(--space-sm) var(--space-xs);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tgdl-segmented button.is-active {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* ── Compact item list (replaces el-table for the Download tab) ──────────── */
+.tgdl-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.tgdl-list-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-sm);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas-soft);
+}
+.tgdl-list-item.is-selected {
+  box-shadow: 0 0 0 2px var(--color-primary) inset;
+}

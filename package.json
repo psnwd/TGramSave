@@ -1,0 +1,31 @@
+{
+  "name": "tgramsave",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@lucide/vue": "^1.27.0",
+    "blueimp-md5": "^2.19.0",
+    "element-plus": "^2.14.3",
+    "fflate": "^0.8.3",
+    "vue": "^3.5.40",
+    "webextension-polyfill": "^0.12.0"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.7.1",
+    "@types/blueimp-md5": "^2.18.2",
+    "@types/chrome": "^0.2.2",
+    "@types/webextension-polyfill": "^0.12.5",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "sharp": "^0.35.3",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3",
+    "vue-tsc": "^3.3.8"
+  }
+}
