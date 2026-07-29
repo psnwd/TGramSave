@@ -69,7 +69,13 @@ Issues and PRs welcome. Please run `make typecheck` before submitting.
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=psnwd/TGramSave&type=Date&legend=bottom-right)](https://www.star-history.com/#psnwd/TGramSave&Date)
+<a href="https://www.star-history.com/?repos=star-history%2Fstar-history&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=psnwd/TGramSave&type=date&theme=dark&legend=top-left&sealed_token=" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=psnwd/TGramSave&type=date&legend=top-left&sealed_token=" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=psnwd/TGramSave&type=date&legend=top-left&sealed_token=" />
+ </picture>
+</a>
 
 ## License
 
