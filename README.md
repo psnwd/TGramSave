@@ -19,7 +19,6 @@ This isn't published to the Chrome Web Store — load it as an unpacked extensio
 
 ```bash
 git clone <this-repo-url>
-cd New
 make install   # or: npm install
 make build     # or: npm run build
 ```
@@ -28,7 +27,7 @@ Then in Chrome/Edge/Brave:
 
 1. Go to `chrome://extensions`
 2. Enable **Developer mode** (top right)
-3. Click **Load unpacked** and select the `New/dist` folder
+3. Click **Load unpacked** and select the `dist` folder
 
 Reload the extension from `chrome://extensions` after every rebuild, and hard-refresh any open `web.telegram.org` tabs to pick up the new content scripts.
 
