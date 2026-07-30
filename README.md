@@ -1,8 +1,25 @@
-# TGramSave
+<div align="center">
+  <img src="public/icons/logo.png" alt="TGramSave logo" width="120" height="120">
 
-**Modern Telegram Web media downloader** - a browser extension that adds one-click download buttons for videos, images, and documents directly inside [web.telegram.org](https://web.telegram.org), plus a popup for batch downloads and whole-channel scraping.
+  # TGramSave
 
-> Unofficial. Not affiliated with, endorsed by, or connected to Telegram FZ-LLC in any way.
+  **Modern Telegram Web media downloader** — a browser extension that adds one-click download buttons for videos, images, and documents directly inside [web.telegram.org](https://web.telegram.org), plus a popup for batch downloads and whole-channel scraping.
+
+  [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+  [![Manifest V3](https://img.shields.io/badge/Manifest-V3-4285F4)](public)
+  [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org)
+  [![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](CHANGELOG.md)
+
+  > Unofficial. Not affiliated with, endorsed by, or connected to Telegram FZ-LLC in any way.
+</div>
+
+## Screenshots
+
+<div align="center">
+  <img src="assets/1.jpg" alt="Download tab — batch download popup" width="270">
+  <img src="assets/2.jpg" alt="Channel tab — whole-channel download (beta)" width="270">
+  <img src="assets/3.jpg" alt="Settings tab — dark theme" width="270">
+</div>
 
 ## Features
 
@@ -18,9 +35,10 @@
 This isn't published to the Chrome Web Store — load it as an unpacked extension:
 
 ```bash
-git clone <this-repo-url>
-make install   # or: npm install
-make build     # or: npm run build
+git clone https://github.com/psnwd/TGramSave.git
+cd TGramSave
+make install   # or: bun install
+make build     # or: bun run build
 ```
 
 Then in Chrome/Edge/Brave:
@@ -41,7 +59,7 @@ make package    # build, then zip dist/ into tgramsave.zip
 make icons      # regenerate public/icons/{16,32,48,128}.png from a master.png
 ```
 
-(`make` just wraps the equivalent `npm run <script>` commands — see the [Makefile](Makefile) — so plain `npm` works too if you don't have `make`.)
+(`make` just wraps the equivalent `bun run <script>` commands — see the [Makefile](Makefile) — so plain `bun` (or `npm`) works too if you don't have `make`.)
 
 ## How it works
 
@@ -68,11 +86,11 @@ Issues and PRs welcome. Please run `make typecheck` before submitting.
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=star-history%2Fstar-history&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=psnwd%2FTGramSave&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=psnwd/TGramSave&type=date&theme=dark&legend=top-left&sealed_token=" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=psnwd/TGramSave&type=date&legend=top-left&sealed_token=" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=psnwd/TGramSave&type=date&legend=top-left&sealed_token=" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=psnwd/TGramSave&type=date&theme=dark&legend=top-left&sealed_token=Fn72sZw-O4hbdyL6C4q2OZPUMaOYC3bHlAXgPgbEEBnmoOiV67T2ekKccexASEvsEsxY6kTQfWzWIwvCz90dCUaa2pmNK7sfAiuzzvrFAtg71bTVNjGdytIZUNJRHwdFqaLmFQXPKRmpxVYEN5aAJn_Lya4r2pV0WbzwXs8i5g5RK0KismslIQCWgB-x" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=psnwd/TGramSave&type=date&legend=top-left&sealed_token=Fn72sZw-O4hbdyL6C4q2OZPUMaOYC3bHlAXgPgbEEBnmoOiV67T2ekKccexASEvsEsxY6kTQfWzWIwvCz90dCUaa2pmNK7sfAiuzzvrFAtg71bTVNjGdytIZUNJRHwdFqaLmFQXPKRmpxVYEN5aAJn_Lya4r2pV0WbzwXs8i5g5RK0KismslIQCWgB-x" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=psnwd/TGramSave&type=date&legend=top-left&sealed_token=Fn72sZw-O4hbdyL6C4q2OZPUMaOYC3bHlAXgPgbEEBnmoOiV67T2ekKccexASEvsEsxY6kTQfWzWIwvCz90dCUaa2pmNK7sfAiuzzvrFAtg71bTVNjGdytIZUNJRHwdFqaLmFQXPKRmpxVYEN5aAJn_Lya4r2pV0WbzwXs8i5g5RK0KismslIQCWgB-x" />
  </picture>
 </a>
 
