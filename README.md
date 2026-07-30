@@ -10,7 +10,7 @@
   [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org)
   [![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](CHANGELOG.md)
 
-  > Unofficial. Not affiliated with, endorsed by, or connected to Telegram FZ-LLC in any way.
+> Unofficial. Not affiliated with, endorsed by, or connected to Telegram FZ-LLC in any way.
 </div>
 
 ## Screenshots
