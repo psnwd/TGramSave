@@ -161,9 +161,15 @@ function isRealMediaSrc(src: string | null | undefined): src is string {
 }
 
 /** Sender/chat/channel avatars (`<img class="Avatar__media avatar-media ...">` next to message bubbles,
- *  in the header, etc.) aren't message content — never treat them as a downloadable item. */
+ *  in the header, etc.) aren't message content — never treat them as a downloadable item.
+ *
+ *  Match real avatar class *tokens* only — `avatar` on its own, `avatar-*` (avatar-media,
+ *  avatar-wrapper, …) or the BEM `Avatar__*` — not any class that merely *contains* the substring
+ *  "avatar". The a-client puts `no-avatars` on a `.MessageList` ancestor of every message, and a
+ *  naive `[class*="avatar" i]` matched that, so `closest()` flagged every single media element as an
+ *  avatar and no download button ever got injected. */
 function isAvatarElement(el: Element): boolean {
-  return Boolean(el.closest('[class*="avatar" i]'));
+  return Boolean(el.closest('[class~="avatar" i], [class*="avatar-" i], [class*="avatar__" i]'));
 }
 
 /**
