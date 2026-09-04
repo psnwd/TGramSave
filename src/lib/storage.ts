@@ -13,6 +13,8 @@ export type DownloadSettings = {
   theme: ThemePreference;
   /** GIFs and animated stickers are served as WebM video — off by default since users rarely want to "download" those. */
   downloadWebm: boolean;
+  /** Show buttons on channel/group preview and invite images (join cards, "channel photo changed" service messages, similar-channels strips). Off by default: those aren't message content. */
+  buttonsOnPreviews: boolean;
   /** Channel tab: per-type + total caps on one download run. `0` = no limit. Remembered between popup sessions. */
   channelLimits: ChannelDownloadLimits;
 };
@@ -26,6 +28,7 @@ const DEFAULT_SETTINGS: DownloadSettings = {
   zipByDefault: false,
   theme: "system",
   downloadWebm: false,
+  buttonsOnPreviews: false,
   channelLimits: { video: 0, image: 0, document: 0, total: 0 },
 };
 

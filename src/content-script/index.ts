@@ -109,6 +109,7 @@ async function scan(): Promise<void> {
     (item) => dispatchDownload({ type: "single", item }),
     (items) => dispatchDownload({ type: "batch", items }),
     settings.downloadWebm,
+    settings.buttonsOnPreviews,
   );
 
   noteScanResult(roots, mediaFound);

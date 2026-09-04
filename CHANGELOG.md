@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 — 2026-09-04
+
+### Added
+
+- **Setting: "Also show it on channel/invite preview images"** (off by default). Controls whether the inline button appears on promotional link-preview cards (channel/group invites, "boost this channel", "subscribe", bot mini-apps, themes), service messages, sponsored posts, and similar-channels strips. Plain photo and article link previews are unaffected.
+
 ## 1.1.0 — 2026-09-04
 
 ### Added

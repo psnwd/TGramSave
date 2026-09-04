@@ -229,6 +229,24 @@ function isAvatarElement(el: Element): boolean {
 }
 
 /**
+ * The photo on a promotional link-preview card (channel/group invite, "boost this channel", "subscribe",
+ * a bot mini-app, a theme), a service message ("channel photo changed"), a sponsored post, or a
+ * similar-channels strip. Not message content you'd download.
+ *
+ * The signal for the promo previews is `.WebPage.with-quick-button` (the little BOOST/VIEW/OPEN button
+ * telegram-a renders on those). A plain photo or article link preview has no such button and is left
+ * alone. Gated by the `buttonsOnPreviews` setting, which is off by default.
+ */
+const PREVIEW_MEDIA_SELECTOR =
+  ".WebPage.with-quick-button, [class*='WebPage--quick-button' i], " +
+  "[class*='ChatInvite' i], [class*='chat-invite' i], [class*='join-chat' i], [class*='JoinRequest' i], " +
+  "[class*='ServiceMessage' i], .ActionMessage, [class~='service'], " +
+  "[class*='SimilarChannels' i], [class*='similar-channels' i], [class*='Sponsored' i], [class*='sponsored-message' i]";
+function isPreviewMedia(el: Element): boolean {
+  return Boolean(el.closest(PREVIEW_MEDIA_SELECTOR));
+}
+
+/**
  * GIFs and video stickers are served by Telegram as silent looping WebM video, not "real" video content.
  * (`video.loop` looked like a reliable signal for this — real video messages are never `loop` — but
  * Telegram Web turned out to also loop ordinary video previews before playback, so that check misfired
@@ -255,10 +273,12 @@ function buildItemFromElement(
   allowWebm: boolean,
   index = 0,
   withThumbnail = true,
+  allowPreviews = false,
 ): DownloadableItem | undefined {
   const src = el.getAttribute("src");
   if (!isRealMediaSrc(src)) return undefined;
   if (isAvatarElement(el)) return undefined;
+  if (!allowPreviews && isPreviewMedia(el)) return undefined;
   if (!allowWebm && isWebmOrSticker(el)) return undefined;
 
   // Emoji / reaction / custom-status images are a few dozen px; real message media isn't. Trust only a
@@ -318,6 +338,7 @@ export function extractAllMediaFromMessage(
   wrapper: Element,
   allowWebm: boolean,
   withThumbnail = true,
+  allowPreviews = false,
 ): Array<{ el: HTMLVideoElement | HTMLImageElement; item: DownloadableItem }> {
   const videos = Array.from(wrapper.querySelectorAll("video"));
   const imgs = Array.from(wrapper.querySelectorAll("img")).filter(
@@ -326,7 +347,7 @@ export function extractAllMediaFromMessage(
 
   const results: Array<{ el: HTMLVideoElement | HTMLImageElement; item: DownloadableItem }> = [];
   [...videos, ...imgs].forEach((el, index) => {
-    const item = buildItemFromElement(el, wrapper, allowWebm, index, withThumbnail);
+    const item = buildItemFromElement(el, wrapper, allowWebm, index, withThumbnail, allowPreviews);
     if (item) results.push({ el, item });
   });
   return results;
@@ -460,6 +481,7 @@ export function injectMessageDownloadButtons(
   onDownload: (item: DownloadableItem) => void,
   onDownloadAll: (items: DownloadableItem[]) => void,
   allowWebm: boolean,
+  allowPreviews: boolean,
 ): ScanResult {
   const roots = findMessageRoots(version);
   let mediaFound = 0;
@@ -467,7 +489,7 @@ export function injectMessageDownloadButtons(
     // No thumbnail capture here — this runs for every message every 3s scan, and the canvas
     // `toDataURL` was the bulk of the cost. The inject helpers grab a thumbnail lazily, once, only
     // when they actually catalog a (new or changed) item.
-    const found = extractAllMediaFromMessage(wrapper, allowWebm, false);
+    const found = extractAllMediaFromMessage(wrapper, allowWebm, false, allowPreviews);
     if (found.length === 0) continue;
     mediaFound += found.length;
 

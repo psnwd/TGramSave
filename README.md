@@ -9,7 +9,7 @@
   [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
   [![Manifest V3](https://img.shields.io/badge/Manifest-V3-4285F4)](public)
   [![Vue 3](https://img.shields.io/badge/Vue-3-42b883)](https://vuejs.org)
-  [![Version](https://img.shields.io/badge/version-1.1.0-brightgreen)](CHANGELOG.md)
+  [![Version](https://img.shields.io/badge/version-1.1.1-brightgreen)](CHANGELOG.md)
 </div>
 
 > Unofficial. Not affiliated with, endorsed by, or connected to Telegram FZ-LLC in any way.

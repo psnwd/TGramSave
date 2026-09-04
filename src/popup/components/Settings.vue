@@ -10,6 +10,7 @@ const video = ref(true);
 const image = ref(true);
 const document_ = ref(false);
 const showInlineButtons = ref(true);
+const buttonsOnPreviews = ref(false);
 const zipByDefault = ref(false);
 const downloadWebm = ref(false);
 const loaded = ref(false);
@@ -28,6 +29,7 @@ onMounted(async () => {
   image.value = settings.image;
   document_.value = settings.document;
   showInlineButtons.value = settings.showInlineButtons;
+  buttonsOnPreviews.value = settings.buttonsOnPreviews;
   zipByDefault.value = settings.zipByDefault;
   downloadWebm.value = settings.downloadWebm;
   loaded.value = true;
@@ -43,6 +45,7 @@ async function save(): Promise<void> {
     image: image.value,
     document: document_.value,
     showInlineButtons: showInlineButtons.value,
+    buttonsOnPreviews: buttonsOnPreviews.value,
     zipByDefault: zipByDefault.value,
     downloadWebm: downloadWebm.value,
     theme: theme.preference.value,
@@ -88,8 +91,16 @@ async function save(): Promise<void> {
     </div>
 
     <div class="field">
-      <el-checkbox v-model="downloadWebm">Also show the download button on GIFs and animated stickers (WebM)</el-checkbox>
-      <p class="hint">Off by default — GIFs/stickers are usually decorative, not something you want to save.</p>
+      <el-checkbox v-model="buttonsOnPreviews" :disabled="!showInlineButtons">
+        Also show it on channel/invite preview images
+      </el-checkbox>
+      <p class="hint">Off by default. The photo on a join card, link preview, or "channel photo changed" notice
+        isn't message content.</p>
+    </div>
+
+    <div class="field">
+      <el-checkbox v-model="downloadWebm" :disabled="!showInlineButtons">Also show the download button on GIFs and animated stickers (WebM)</el-checkbox>
+      <p class="hint">Off by default. GIFs and stickers are usually decorative, not something you want to save.</p>
     </div>
 
     <div class="field">
