@@ -1,7 +1,7 @@
-import { defineConfig } from "vite";
-import vue from "@vitejs/plugin-vue";
-import { crx } from "@crxjs/vite-plugin";
 import { fileURLToPath, URL } from "node:url";
+import { crx } from "@crxjs/vite-plugin";
+import vue from "@vitejs/plugin-vue";
+import { defineConfig } from "vite";
 import manifest from "./src/manifest";
 
 export default defineConfig({

@@ -3,17 +3,33 @@
  * Supports both web.telegram.org/a and web.telegram.org/k.
  */
 import browser from "webextension-polyfill";
-import { buildZip, toBlob, uniqueZipEntryName } from "@/lib/zip";
+import { detectTelegramVersion, extractAllMediaFromMessage, findMessageRoots } from "@/content-script/catalog";
 import type {
   ChannelDlCheckPageResponse,
   ChannelDlPeekResponse,
   ChannelDlStatusResponse,
+  ChannelDownloadLimits,
   ChannelDownloadOptions,
+  DownloadableItem,
   ExtensionMessage,
+  VideoDownloadEventDetail,
 } from "@/types/messages";
 
-type MediaItem = { src: string; type: "video" | "image" | "document"; mid: string; ext: string };
-type MediaTypeFlags = { video: boolean; image: boolean; document: boolean };
+type MediaKind = "video" | "image" | "document";
+type MediaTypeFlags = Record<MediaKind, boolean>;
+const MEDIA_KINDS: readonly MediaKind[] = ["video", "image", "document"];
+const NO_LIMITS: ChannelDownloadLimits = { video: 0, image: 0, document: 0, total: 0 };
+
+/**
+ * Pacing. The point is to walk a whole channel's history without hammering Telegram: one scroll step
+ * per ~2s (its history pagination fires on scroll), and downloads run strictly one-at-a-time — the next
+ * only starts once the MAIN-world downloader reports the current one finished (or times out).
+ */
+const SCROLL_STEP_DELAY_MS = 1900;
+const BETWEEN_DOWNLOADS_MS = 600;
+const DOWNLOAD_TIMEOUT_MS = 150_000;
+const MAX_SCROLL_ROUNDS = 6000; // hard safety cap against an unbounded loop
+const STAGNANT_ROUNDS_TO_FINISH = 6; // rounds sat at the top with nothing new before we call it done
 
 let running = false;
 let paused = false;
@@ -22,13 +38,13 @@ let totalFound = 0;
 let totalDownloaded = 0;
 let seenUrls = new Set<string>();
 let mediaTypes: MediaTypeFlags = { video: true, image: true, document: true };
+let limits: ChannelDownloadLimits = { ...NO_LIMITS };
+/** How many of each kind this run has dispatched — the counter the caps are checked against (a timed-out download still counts, so a cap can't be blown by retries). */
+let dispatchedByKind: Record<MediaKind, number> = { video: 0, image: 0, document: 0 };
 let zipMode = false;
-let zipFiles: Record<string, Uint8Array> = {};
-let zipUsedNames = new Set<string>();
-
-function detectVersion(): "a" | "k" {
-  return window.location.href.includes("web.telegram.org/k") ? "k" : "a";
-}
+/** Zip mode doesn't stream files one by one — it collects the whole list and hands it to the MAIN-world
+ *  downloader at the end, which fetches + archives them in the page context. See `dispatchDownload`. */
+let zipBatch: DownloadableItem[] = [];
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -41,146 +57,223 @@ function safeName(str: string): string {
     .substring(0, 60);
 }
 
-function getScrollContainer(): Element {
-  const selectors = [
-    ".messages-layout .scrollable",
-    ".chat .bubbles",
-    "#column-center .scrollable-y",
-    ".bubbles.can-scroll",
-    ".messages-container",
-  ];
-  for (const selector of selectors) {
-    const el = document.querySelector(selector);
-    if (el) return el;
+/**
+ * The message list's own scroll viewport. Telegram renames its layout classes freely (that's what broke
+ * the inline buttons), so don't trust a fixed selector list: walk up from a real message element until
+ * an ancestor is actually vertically scrollable, and only fall back to known selectors / the document.
+ */
+function getScrollContainer(): HTMLElement {
+  let node = (findMessageRoots(detectTelegramVersion())[0] as HTMLElement | undefined) ?? null;
+  while (node && node !== document.body) {
+    const overflowY = getComputedStyle(node).overflowY;
+    if (node.scrollHeight > node.clientHeight + 40 && (overflowY === "auto" || overflowY === "scroll")) return node;
+    node = node.parentElement;
   }
-  return document.documentElement;
-}
-
-async function scrollToTop(): Promise<void> {
-  const el = getScrollContainer();
-  el.scrollTop = 0;
-  await sleep(1500);
-  for (let i = 0; i < 30; i++) {
-    if (el.scrollTop < 100) break;
-    el.scrollTop = 0;
-    await sleep(500);
+  for (const sel of [".messages-container", ".MessageList", ".bubbles", ".scrollable-y", ".chat .scrollable"]) {
+    const el = document.querySelector<HTMLElement>(sel);
+    if (el && el.scrollHeight > el.clientHeight) return el;
   }
-}
-
-function scrollDown(container: Element, amount = 800): void {
-  container.scrollBy({ top: amount, behavior: "smooth" });
-}
-
-function isAtBottom(container: Element): boolean {
-  return container.scrollTop + container.clientHeight >= container.scrollHeight - 80;
+  return (document.scrollingElement as HTMLElement) ?? document.documentElement;
 }
 
 function getChannelTitle(): string {
   return (
-    document.querySelector(".chat-info .peer-title, .chat-title, .MiddleHeader .title, .TopBar .user-title, .peer-title")
+    document
+      .querySelector(".chat-info .peer-title, .chat-title, .MiddleHeader .title, .TopBar .user-title, .peer-title")
       ?.textContent?.trim() ?? ""
   );
 }
 
-function getMessageElements(version: "a" | "k"): NodeListOf<Element> {
-  return version === "a"
-    ? document.querySelectorAll(".Message, .message-list-item, .message")
-    : document.querySelectorAll(".bubbles-group > .bubbles-group-item, .bubbles-group-item, .bubble");
+function kindOf(item: DownloadableItem): MediaKind {
+  return item.kind === "image" || item.kind === "document" ? item.kind : "video";
 }
 
-/** Shared selector/extraction logic behind both the real collection pass and the non-destructive peek/re-scan. */
-function extractItemsFromMessage(msg: Element, version: "a" | "k", types: MediaTypeFlags): MediaItem[] {
-  const items: MediaItem[] = [];
-  const mid = msg.getAttribute("data-message-id") ?? msg.getAttribute("data-mid") ?? msg.id;
-  if (!mid) return items;
+/**
+ * Best-effort document extraction for a message root. Telegram Web mostly downloads file attachments via
+ * an in-page JS click with no stable URL, so this only catches the cases that *do* expose one — a real
+ * `href` on the download control, or a `progressive/document…` link. Empty result is expected & fine.
+ */
+function extractDocsFromMessage(root: Element): DownloadableItem[] {
+  const out: DownloadableItem[] = [];
+  const anchors = root.querySelectorAll<HTMLAnchorElement>(
+    'a[href*="progressive/document"], a[href][download], .File a[href], .document a[href], a.media-document[href]',
+  );
+  for (const a of anchors) {
+    const href = a.getAttribute("href");
+    if (!href || href.startsWith("data:") || href === "#") continue;
+    out.push({ videoUrl: href, videoId: href, page: "channel", downloadId: href, kind: "document" });
+  }
+  return out;
+}
 
-  if (types.video) {
-    msg.querySelectorAll("video.full-media, video.media-video").forEach((v) => {
-      const src = v.getAttribute("src");
-      if (src) items.push({ src, type: "video", mid, ext: "mp4" });
-    });
-    if (version === "a") {
-      const docContainer = msg.querySelector(".document");
-      const docSrc = docContainer?.getAttribute("data-src") ?? "";
-      if (docSrc) items.push({ src: docSrc, type: "video", mid, ext: "mp4" });
+/** Every downloadable media item currently in the DOM, via the same extraction the inline buttons use.
+ *  `withThumbnail` stays off — the channel flow never renders a thumbnail, and the canvas capture is the
+ *  costly part of extraction (matters for the scroll-driven recount, which runs on every scroll idle). */
+function scanVisibleMedia(types: MediaTypeFlags): DownloadableItem[] {
+  const out: DownloadableItem[] = [];
+  for (const root of findMessageRoots(detectTelegramVersion())) {
+    for (const { item } of extractAllMediaFromMessage(root, false, false)) {
+      if (types[kindOf(item)]) out.push(item);
     }
+    if (types.document) out.push(...extractDocsFromMessage(root));
   }
-
-  if (types.image) {
-    msg.querySelectorAll("img.full-media, img.media-photo").forEach((img) => {
-      const src = img.getAttribute("src");
-      if (src && !src.startsWith("blob:")) items.push({ src, type: "image", mid, ext: "jpg" });
-    });
-  }
-
-  if (types.document && version === "a") {
-    msg.querySelectorAll("a.document-download, .download-button").forEach((a) => {
-      const href = a.getAttribute("href") ?? a.getAttribute("data-href") ?? "";
-      if (href) {
-        const ext = href.split(".").pop()?.split("?")[0] || "bin";
-        items.push({ src: href, type: "document", mid, ext });
-      }
-    });
-  }
-
-  return items;
+  return out;
 }
 
-function collectVisibleMedia(version: "a" | "k"): MediaItem[] {
-  const items: MediaItem[] = [];
-  getMessageElements(version).forEach((msg) => {
-    for (const item of extractItemsFromMessage(msg, version, mediaTypes)) {
-      if (seenUrls.has(item.src)) continue;
-      seenUrls.add(item.src);
-      totalFound++;
-      items.push(item);
-    }
-  });
-  return items;
+/** Coerce whatever the popup sent into 4 non-negative integers (0 = no limit). */
+function normalizeLimits(raw: ChannelDownloadLimits | undefined): ChannelDownloadLimits {
+  const clean = (n: unknown) => (Number.isFinite(Number(n)) && Number(n) > 0 ? Math.floor(Number(n)) : 0);
+  return raw
+    ? { video: clean(raw.video), image: clean(raw.image), document: clean(raw.document), total: clean(raw.total) }
+    : { ...NO_LIMITS };
 }
 
-/** Read-only count of what's currently visible — used for the popup's "Found" preview before Start is ever clicked, and for manual re-scan. */
-function countVisibleMedia(version: "a" | "k", types: MediaTypeFlags): number {
+function dispatchedTotal(): number {
+  return dispatchedByKind.video + dispatchedByKind.image + dispatchedByKind.document;
+}
+
+/** This kind can't take any more (its own cap, or the total cap, is full). */
+function kindCapReached(kind: MediaKind): boolean {
+  if (limits.total > 0 && dispatchedTotal() >= limits.total) return true;
+  return limits[kind] > 0 && dispatchedByKind[kind] >= limits[kind];
+}
+
+/** Nothing left this run can do — the total cap is full, or every *selected* kind has hit its own cap. */
+function allCapsReached(): boolean {
+  if (limits.total > 0 && dispatchedTotal() >= limits.total) return true;
+  const selected = MEDIA_KINDS.filter((k) => mediaTypes[k]);
+  return selected.length > 0 && selected.every((k) => limits[k] > 0 && dispatchedByKind[k] >= limits[k]);
+}
+
+/** Why (if at all) the scroll-and-download loop should stop this round. */
+function loopFinishReason(atTop: boolean, stagnantAtTop: number): string | null {
+  if (allCapsReached()) return "Download limit reached";
+  if (atTop && stagnantAtTop >= STAGNANT_ROUNDS_TO_FINISH) return "Reached start of channel";
+  return null;
+}
+
+/**
+ * Media on screen that hasn't been handled yet. Deliberately does *not* mark items seen — the caller
+ * does that only right before it actually dispatches each one, so anything left unprocessed when the
+ * user pauses/stops mid-batch is picked up again on the next pass instead of being silently skipped.
+ */
+function collectNewMedia(): DownloadableItem[] {
+  return scanVisibleMedia(mediaTypes).filter((item) => !seenUrls.has(item.videoUrl));
+}
+
+/** Read-only count of what's currently visible — the popup's "Found" preview before Start, and manual re-scan. */
+function countVisibleMedia(types: MediaTypeFlags): number {
   const seen = new Set<string>();
-  let count = 0;
-  getMessageElements(version).forEach((msg) => {
-    for (const item of extractItemsFromMessage(msg, version, types)) {
-      if (seen.has(item.src)) continue;
-      seen.add(item.src);
-      count++;
-    }
-  });
-  return count;
+  for (const item of scanVisibleMedia(types)) seen.add(item.videoUrl);
+  return seen.size;
 }
 
-async function dispatchDownload(item: MediaItem, folderName: string): Promise<void> {
-  const filename = `${folderName}/${item.type}_${item.mid}_${Date.now()}.${item.ext}`;
+/* ─── live "currently visible" count while the popup's Channel tab is open ──────────────────────────
+ * The popup opens a watch (`channel_dl_watch`) on mount and closes it (`channel_dl_unwatch`) on unmount,
+ * so this does zero work when nobody's looking. While watching: a passive scroll listener, trailing-
+ * debounced, recounts only after scrolling settles and only pushes a message when the number changed. */
+let peekWatching = false;
+let peekTypes: MediaTypeFlags = { video: true, image: true, document: true };
+let peekScroller: HTMLElement | undefined;
+let peekDebounce: ReturnType<typeof setTimeout> | undefined;
+let lastPeekCount = -1;
 
+function pushPeekCount(): void {
+  if (!peekWatching || running) return;
+  const count = countVisibleMedia(peekTypes);
+  if (count === lastPeekCount) return;
+  lastPeekCount = count;
+  void browser.runtime.sendMessage({ type: "channel_dl_found", found: count }).catch(() => undefined);
+}
+
+function onPeekScroll(): void {
+  if (peekDebounce) clearTimeout(peekDebounce);
+  peekDebounce = setTimeout(pushPeekCount, 450);
+}
+
+function startPeekWatch(types: MediaTypeFlags): void {
+  peekTypes = types;
+  lastPeekCount = -1;
+  if (!peekWatching) {
+    peekWatching = true;
+    peekScroller = getScrollContainer();
+    peekScroller.addEventListener("scroll", onPeekScroll, { passive: true });
+  }
+  pushPeekCount(); // immediate value for the new/updated watch
+}
+
+function stopPeekWatch(): void {
+  peekWatching = false;
+  peekScroller?.removeEventListener("scroll", onPeekScroll);
+  peekScroller = undefined;
+  if (peekDebounce) {
+    clearTimeout(peekDebounce);
+    peekDebounce = undefined;
+  }
+}
+
+/**
+ * Channel media `src`es are the same virtual `web.telegram.org/{a,k}/progressive/…` (and sometimes
+ * `blob:`) URLs the inline buttons handle — only the *page's own* service worker can turn them into real
+ * bytes with the logged-in Telegram session. Handing the bare URL to `chrome.downloads` from the
+ * background worker (what this used to do) fetched it with no session and saved the SPA's HTML shell as
+ * `video_….htm` ("Site wasn't available"). So route every item through the exact channel the inline
+ * buttons use: a `video_download` CustomEvent that content-script-inject picks up in the page's MAIN
+ * world, where it does the range-chunked fetch, reassembly and save.
+ */
+function dispatchToInjector(detail: VideoDownloadEventDetail): void {
+  document.dispatchEvent(new CustomEvent<VideoDownloadEventDetail>("video_download", { detail }));
+}
+
+/**
+ * Resolves when content-script-inject reports this download finished (progress ≥ 100) — or on timeout.
+ * The injector emits `<downloadId>_video_download_progress` CustomEvents on `document` as it fetches;
+ * gating the next dispatch on this keeps channel downloads strictly sequential and gentle on the CDN.
+ */
+function waitForInjectorDownload(downloadId: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const eventName = `${downloadId}_video_download_progress`;
+    const finish = (ok: boolean) => {
+      document.removeEventListener(eventName, onProgress);
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    const onProgress = (e: Event) => {
+      if (((e as CustomEvent<{ progress: number }>).detail?.progress ?? 0) >= 100) finish(true);
+    };
+    const timer = setTimeout(() => finish(false), DOWNLOAD_TIMEOUT_MS);
+    document.addEventListener(eventName, onProgress);
+  });
+}
+
+async function dispatchDownload(item: DownloadableItem): Promise<void> {
   if (zipMode) {
-    try {
-      const res = await fetch(item.src);
-      const data = new Uint8Array(await res.arrayBuffer());
-      zipFiles[uniqueZipEntryName(filename, zipUsedNames)] = data;
-      totalDownloaded++;
-      sendStatus(`Zipping: ${item.type} #${item.mid}`);
-    } catch {
-      sendStatus(`⚠ Failed to fetch ${item.type} #${item.mid}`);
-    }
+    zipBatch.push(item);
+    sendStatus(`Queued for zip: ${item.kind ?? "media"} ${item.videoId}`);
     return;
   }
-
-  void browser.runtime.sendMessage({ type: "channel_dl_item", src: item.src, filename, mid: item.mid });
-  totalDownloaded++;
-  sendStatus(`Downloading: ${item.type} #${item.mid}`);
+  dispatchToInjector({ type: "single", item });
+  sendStatus(`Downloading ${totalDownloaded + 1}/${totalFound}: ${item.kind ?? "media"}`);
+  const ok = await waitForInjectorDownload(item.downloadId);
+  if (ok) totalDownloaded++;
+  else sendStatus(`⚠ Timed out on ${item.videoId} — moving on`);
 }
 
-function triggerBlobDownload(blob: Blob, filename: string): void {
-  const objectUrl = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = objectUrl;
-  link.download = filename;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
+/** Download (or, in zip mode, queue) every not-yet-seen media item currently on screen, one at a time,
+ *  honouring the per-type and total caps. */
+async function processVisibleBatch(): Promise<void> {
+  for (const item of collectNewMedia()) {
+    if (stopRequested || paused) return;
+    const kind = kindOf(item);
+
+    seenUrls.add(item.videoUrl); // mark now — a paused batch resumes cleanly (see collectNewMedia)
+    if (kindCapReached(kind)) continue; // over this kind's (or the total) cap — skip, stay marked seen
+
+    totalFound++;
+    dispatchedByKind[kind]++;
+    await dispatchDownload(item);
+    if (!zipMode) await sleep(BETWEEN_DOWNLOADS_MS);
+  }
 }
 
 function sendStatus(message: string, extra: { folder?: string; done?: boolean } = {}): void {
@@ -214,73 +307,69 @@ async function runChannelDownload(options: Partial<ChannelDownloadOptions> = {})
     image: options.image !== false,
     document: options.document !== false,
   };
+  limits = normalizeLimits(options.limits);
+  dispatchedByKind = { video: 0, image: 0, document: 0 };
   zipMode = options.zip === true;
-  zipFiles = {};
-  zipUsedNames = new Set();
-  const version = detectVersion();
+  zipBatch = [];
   const saveFolder = options.folder ?? "";
 
   const channelTitle = safeName(getChannelTitle() || "tg_channel");
   const folderName = (saveFolder ? `${safeName(saveFolder)}/` : "") + channelTitle;
 
-  sendStatus("Starting channel download…", { folder: folderName });
+  sendStatus("Starting — jumping to newest message…", { folder: folderName });
 
-  await scrollToTop();
-  await sleep(2000);
+  const scroller = getScrollContainer();
+  scroller.scrollTop = scroller.scrollHeight; // start at the newest message
+  await sleep(1500);
 
-  const container = getScrollContainer();
-  let noNewRounds = 0;
-  const MAX_NO_NEW = 8;
+  // Walk history upward: collect what's on screen, download it (one at a time), step up ~one screenful,
+  // let Telegram page in older messages, repeat. Stops on a cap, on reaching the channel start, or on Stop.
+  let stagnantAtTop = 0;
 
-  while (!stopRequested) {
+  for (let round = 0; round < MAX_SCROLL_ROUNDS && !stopRequested; round++) {
     if (paused) {
       await sleep(300);
       continue;
     }
 
-    const prevFound = totalFound;
-    const items = collectVisibleMedia(version);
-
-    for (const item of items) {
-      if (stopRequested || paused) break;
-      await dispatchDownload(item, folderName);
-      await sleep(300);
-    }
+    const foundBefore = totalFound;
+    await processVisibleBatch();
     if (paused) continue;
 
-    noNewRounds = totalFound === prevFound ? noNewRounds + 1 : 0;
+    const atTop = scroller.scrollTop <= 4;
+    stagnantAtTop = atTop && totalFound === foundBefore ? stagnantAtTop + 1 : 0;
 
-    if (isAtBottom(container)) {
-      sendStatus("Reached end of channel", { done: true });
-      break;
-    }
-    if (noNewRounds >= MAX_NO_NEW) {
-      sendStatus("No new media found, finishing", { done: true });
+    const finishReason = loopFinishReason(atTop, stagnantAtTop);
+    if (finishReason) {
+      sendStatus(finishReason, { done: true });
       break;
     }
 
-    scrollDown(container);
-    await sleep(1200);
+    scroller.scrollTop = Math.max(0, scroller.scrollTop - scroller.clientHeight * 0.85);
+    await sleep(SCROLL_STEP_DELAY_MS);
   }
 
-  await finalizeZipIfNeeded(folderName);
+  finalizeZipIfNeeded(folderName);
 
   running = false;
   paused = false;
   stopRequested = false;
+  lastPeekCount = -1; // let the scroll watcher push a fresh count again now that the run is over
   sendStatus(`Done! ${totalDownloaded} file(s) downloaded`, { done: true });
 }
 
-async function finalizeZipIfNeeded(folderName: string): Promise<void> {
-  if (!zipMode || Object.keys(zipFiles).length === 0) return;
+function finalizeZipIfNeeded(folderName: string): void {
+  if (!zipMode || zipBatch.length === 0) return;
 
-  sendStatus(`Zipping ${totalDownloaded} file(s)…`);
-  try {
-    const zipped = await buildZip(zipFiles);
-    triggerBlobDownload(toBlob(zipped), `${folderName.replaceAll("/", "_")}.zip`);
-  } catch {
-    sendStatus("⚠ Failed to build zip archive");
-  }
+  sendStatus(`Zipping ${zipBatch.length} file(s)…`);
+  // Same MAIN-world downloader as the single path — it fetches every item's bytes in the page context,
+  // builds the archive there, and triggers one download.
+  dispatchToInjector({
+    type: "batch",
+    items: zipBatch,
+    zip: true,
+    zipName: `${folderName.replaceAll("/", "_")}.zip`,
+  });
 }
 
 browser.runtime.onMessage.addListener((raw: unknown, _sender, sendResponse: (response: unknown) => void): true => {
@@ -316,17 +405,25 @@ browser.runtime.onMessage.addListener((raw: unknown, _sender, sendResponse: (res
     case "channel_dl_check_page": {
       const response: ChannelDlCheckPageResponse = {
         onTg: window.location.href.includes("web.telegram.org"),
-        version: detectVersion(),
+        version: detectTelegramVersion(),
         channelTitle: getChannelTitle(),
       };
       sendResponse(response);
       break;
     }
     case "channel_dl_peek": {
-      const response: ChannelDlPeekResponse = { found: countVisibleMedia(detectVersion(), message.mediaTypes) };
+      const response: ChannelDlPeekResponse = { found: countVisibleMedia(message.mediaTypes) };
       sendResponse(response);
       break;
     }
+    case "channel_dl_watch":
+      startPeekWatch(message.mediaTypes);
+      sendResponse({ ok: true });
+      break;
+    case "channel_dl_unwatch":
+      stopPeekWatch();
+      sendResponse({ ok: true });
+      break;
     case "channel_dl_open_panel":
       injectFloatingPanel();
       break;

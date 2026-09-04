@@ -18,7 +18,9 @@ const MAX_CONCURRENT_CHUNKS = 6;
 const MAX_RETRIES_PER_CHUNK = 3;
 
 function reportProgress(downloadId: string, progress: number): void {
-  document.dispatchEvent(new CustomEvent(`${downloadId}_video_download_progress`, { detail: { progress, video_id: downloadId } }));
+  document.dispatchEvent(
+    new CustomEvent(`${downloadId}_video_download_progress`, { detail: { progress, video_id: downloadId } }),
+  );
 }
 
 /** Telegram media URLs sometimes carry a `stream/<json>` payload with a real filename/location id. */
@@ -142,7 +144,8 @@ async function fetchNetworkUrlBytes(item: DownloadableItem): Promise<FetchedByte
   // asked for) — use however many bytes it actually sent as the per-request window for every
   // subsequent chunk, rather than an arbitrary client-chosen CHUNK_SIZE that the server ignores.
   const segmentSize = range ? range.end - range.start + 1 : probeBuf.byteLength;
-  const supportsRange = acceptsRanges && probe.status === 206 && totalSize > 0 && segmentSize > 0 && segmentSize < totalSize;
+  const supportsRange =
+    acceptsRanges && probe.status === 206 && totalSize > 0 && segmentSize > 0 && segmentSize < totalSize;
 
   if (!supportsRange) {
     reportProgress(item.downloadId, 100);
@@ -150,7 +153,7 @@ async function fetchNetworkUrlBytes(item: DownloadableItem): Promise<FetchedByte
   }
 
   const chunkCount = Math.ceil(totalSize / segmentSize);
-  const chunks: ArrayBuffer[] = new Array(chunkCount);
+  const chunks: ArrayBuffer[] = Array.from({ length: chunkCount });
   chunks[0] = probeBuf; // the probe request already fetched segment 0 — don't re-fetch it
   let completed = 1;
   reportProgress(item.downloadId, Math.round((completed / chunkCount) * 100));

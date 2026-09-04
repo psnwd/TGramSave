@@ -1,4 +1,5 @@
 import browser from "webextension-polyfill";
+import type { ChannelDownloadLimits } from "@/types/messages";
 
 export type ThemePreference = "light" | "dark" | "system";
 
@@ -12,6 +13,8 @@ export type DownloadSettings = {
   theme: ThemePreference;
   /** GIFs and animated stickers are served as WebM video — off by default since users rarely want to "download" those. */
   downloadWebm: boolean;
+  /** Channel tab: per-type + total caps on one download run. `0` = no limit. Remembered between popup sessions. */
+  channelLimits: ChannelDownloadLimits;
 };
 
 const DEFAULT_SETTINGS: DownloadSettings = {
@@ -23,6 +26,7 @@ const DEFAULT_SETTINGS: DownloadSettings = {
   zipByDefault: false,
   theme: "system",
   downloadWebm: false,
+  channelLimits: { video: 0, image: 0, document: 0, total: 0 },
 };
 
 export async function getSettings(): Promise<DownloadSettings> {

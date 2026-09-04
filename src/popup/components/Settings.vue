@@ -34,7 +34,10 @@ onMounted(async () => {
 });
 
 async function save(): Promise<void> {
+  // Spread the stored settings first so fields this screen doesn't edit (e.g. the Channel tab's
+  // `channelLimits`) are preserved rather than dropped.
   const settings: DownloadSettings = {
+    ...(await getSettings()),
     defaultFolder: defaultFolder.value.trim(),
     video: video.value,
     image: image.value,

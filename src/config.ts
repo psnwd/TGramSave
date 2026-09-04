@@ -1,7 +1,7 @@
 /** Single source of truth for branding/version/publisher info used across the manifest and popup UI. Edit here, not at each call site. */
 export const APP_NAME = "TGramSave";
 export const APP_TAGLINE = "Save Telegram Videos in One Click";
-export const APP_VERSION = "1.0.0";
+export const APP_VERSION = "1.1.0";
 export const APP_DESCRIPTION =
   "Free extension to download videos from Telegram channels and groups, including private ones, in a single click.";
 

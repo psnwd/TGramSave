@@ -148,6 +148,15 @@ body {
 .el-button.is-circle {
   border-radius: var(--radius-pill) !important;
 }
+/* The brand colour rules above use `!important`, which also overrode Element Plus's own dimmed
+   disabled palette — a disabled button looked identical to an enabled one. Force the disabled look. */
+.el-button.is-disabled,
+.el-button.is-disabled:hover,
+.el-button.is-disabled:focus,
+.el-button.is-disabled.is-plain {
+  opacity: 0.45 !important;
+  cursor: not-allowed !important;
+}
 
 /* ── Inputs & checkboxes ──────────────────────────────────────────────────── */
 .el-input__wrapper {

@@ -1,13 +1,24 @@
 import browser from "webextension-polyfill";
-import { hashTabUrl, hashValue } from "@/lib/md5";
 import { waitForSelector } from "@/lib/dom-wait";
+import { hashTabUrl, hashValue } from "@/lib/md5";
 import type { DownloadableItem } from "@/types/messages";
 
 export type TelegramVersion = "a" | "k";
 
 interface VersionConfig {
-  /** Every chat-message bubble that may contain downloadable media — verified straight from the original extension's bootstrap (content-script.js:78662-78665), not guessed. */
-  messageWrapperClass: string;
+  /**
+   * Selectors for a single chat-message root, ordered tightest → loosest. `findMessageRoots` returns
+   * the matches of the *first* selector that hits anything, so a Telegram rename of the tight selector
+   * degrades to the next one instead of silently injecting nothing. Historically this was one hard
+   * `messageWrapperClass` string (`message-content-wrapper` / `bubble-content-wrapper`) — fine until
+   * Telegram renamed it and every button vanished with no error. If every entry here misses too,
+   * `findMessageRoots` falls back to anchoring on the media elements themselves.
+   */
+  messageRootSelectors: string[];
+  /** The main conversation column, loosest-last. Everything (selector scan *and* media-anchored fallback) is confined to the first of these that exists, so the chat list, the right-hand panel and search results — all of which also contain `.Message`/media nodes — are never scanned. */
+  messageListSelectors: string[];
+  /** Belt-and-suspenders: any candidate inside one of these regions is dropped even if it slipped through `messageListSelectors` (e.g. the right column hosts its own `.MessageList` for comment threads). */
+  excludeRegionSelectors: string;
   /** The media viewer (opened by clicking into a message's media) — used to page through a lazily-loaded album. */
   mediaViewer: {
     containerSelector: string;
@@ -17,14 +28,23 @@ interface VersionConfig {
 
 const VERSION_CONFIG: Record<TelegramVersion, VersionConfig> = {
   a: {
-    messageWrapperClass: "message-content-wrapper",
+    messageRootSelectors: ['[id^="message-"].Message', ".Message", ".message-content-wrapper"],
+    messageListSelectors: [
+      "#MiddleColumn .MessageList",
+      ".messages-layout .MessageList",
+      ".MessageList",
+      ".messages-container",
+    ],
+    excludeRegionSelectors: "#RightColumn, #LeftColumn, .LeftColumn, .RightColumn, .search-result, .SearchResults",
     mediaViewer: {
       containerSelector: ".MediaViewerSlide--active",
       nextButtonSelector: ".MediaViewerActions .Button.smaller.round",
     },
   },
   k: {
-    messageWrapperClass: "bubble-content-wrapper",
+    messageRootSelectors: [".bubble[data-mid]", ".bubble", ".bubble-content-wrapper"],
+    messageListSelectors: ["#column-center .bubbles", ".chat .bubbles", ".bubbles"],
+    excludeRegionSelectors: "#column-left, #column-right, .sidebar-left, .sidebar-right, .chatlist, .search-super",
     mediaViewer: {
       containerSelector: ".media-viewer-movers",
       nextButtonSelector: ".media-viewer-buttons .btn-icon",
@@ -34,6 +54,40 @@ const VERSION_CONFIG: Record<TelegramVersion, VersionConfig> = {
 
 export function detectTelegramVersion(): TelegramVersion {
   return window.location.href.includes("web.telegram.org/a") ? "a" : "k";
+}
+
+/**
+ * Resolves the message-root elements to scan for media without betting everything on one class name:
+ *   1. Walk `messageRootSelectors` (tight → loose); return the first selector that matches anything.
+ *   2. Fallback — collect every `<video>`/`<img>` inside the known message-list scroll region and map
+ *      each to its nearest id/`data-mid` ancestor (or its parent); that deduped set becomes the roots.
+ * Only when *both* yield nothing does injection no-op — and the caller then logs that the DOM likely
+ * changed, so a future Telegram reshuffle surfaces as a console warning instead of silent breakage.
+ */
+export function findMessageRoots(version: TelegramVersion): Element[] {
+  const cfg = VERSION_CONFIG[version];
+
+  // Confine everything to the open conversation's own column. `.Message` / media nodes also live in the
+  // chat list (left) and the profile / shared-media / comment-thread panel (right); injecting there put
+  // download buttons all over the sidebar and chat list.
+  const region = cfg.messageListSelectors.map((s) => document.querySelector(s)).find(Boolean);
+  const scope: ParentNode = region ?? document;
+  const inChatArea = (el: Element): boolean =>
+    (!region || region.contains(el)) && !el.closest(cfg.excludeRegionSelectors);
+
+  for (const selector of cfg.messageRootSelectors) {
+    const matches = Array.from(scope.querySelectorAll(selector)).filter(inChatArea);
+    if (matches.length > 0) return matches;
+  }
+
+  const roots = new Set<Element>();
+  for (const el of Array.from((region ?? document.body).querySelectorAll("video, img"))) {
+    if (!inChatArea(el)) continue;
+    const hasSource = isRealMediaSrc(el.getAttribute("src")) || Boolean((el as HTMLMediaElement).currentSrc);
+    if (!hasSource || isAvatarElement(el)) continue;
+    roots.add(el.closest("[data-mid], [data-message-id], [id^='message-']") ?? el.parentElement ?? el);
+  }
+  return Array.from(roots);
 }
 
 const REST_SHADOW = "0 2px 4px rgba(0,0,0,.35), 0 0 0 2px rgba(159,232,112,.55)";
@@ -109,7 +163,9 @@ async function catalogItem(item: DownloadableItem): Promise<void> {
   } catch (err) {
     if (err instanceof Error && err.message.includes("Extension context invalidated")) {
       contextInvalidated = true;
-      console.warn("[tgdl] extension was reloaded/updated — refresh this page to restore the media list/badge. Inline download buttons still work.");
+      console.warn(
+        "[tgdl] extension was reloaded/updated — refresh this page to restore the media list/badge. Inline download buttons still work.",
+      );
     } else {
       console.error("[tgdl] failed to catalog item:", err);
     }
@@ -137,7 +193,7 @@ const THUMB_SIZE = 64;
  * `chrome-extension://` origin, which is why loading `videoUrl` directly in
  * the popup mostly failed. A `data:` URL has no such restriction.
  */
-function captureThumbnail(el: HTMLVideoElement | HTMLImageElement): string | undefined {
+export function captureThumbnail(el: HTMLVideoElement | HTMLImageElement): string | undefined {
   try {
     const canvas = document.createElement("canvas");
     canvas.width = THUMB_SIZE;
@@ -192,14 +248,26 @@ function isWebmOrSticker(el: HTMLVideoElement | HTMLImageElement): boolean {
   return Boolean(el.closest('[class*="sticker" i], [class*="gif" i], [class*="emoji" i]'));
 }
 
-/** Builds a `DownloadableItem` for one specific media element (used both for a single-media message and for each element inside a grouped/album message). `index` is this element's position among its message's media elements — see `idFor`. */
-function buildItemFromElement(el: HTMLVideoElement | HTMLImageElement, wrapper: Element, allowWebm: boolean, index = 0): DownloadableItem | undefined {
+/** Builds a `DownloadableItem` for one specific media element (used both for a single-media message and for each element inside a grouped/album message). `index` is this element's position among its message's media elements — see `idFor`. Pass `withThumbnail = false` to skip the canvas thumbnail capture — the expensive part — when the caller (e.g. the channel downloader, or a scroll-driven count) never renders one. */
+function buildItemFromElement(
+  el: HTMLVideoElement | HTMLImageElement,
+  wrapper: Element,
+  allowWebm: boolean,
+  index = 0,
+  withThumbnail = true,
+): DownloadableItem | undefined {
   const src = el.getAttribute("src");
   if (!isRealMediaSrc(src)) return undefined;
   if (isAvatarElement(el)) return undefined;
   if (!allowWebm && isWebmOrSticker(el)) return undefined;
 
-  const thumbnailDataUrl = captureThumbnail(el);
+  // Emoji / reaction / custom-status images are a few dozen px; real message media isn't. Trust only a
+  // *measured* size — a not-yet-loaded <img> reports 0 and must pass through, to be re-checked next scan.
+  const w = el.clientWidth || (el as HTMLImageElement).naturalWidth || 0;
+  const h = el.clientHeight || (el as HTMLImageElement).naturalHeight || 0;
+  if (w > 0 && h > 0 && w < 48 && h < 48) return undefined;
+
+  const thumbnailDataUrl = withThumbnail ? captureThumbnail(el) : undefined;
 
   // Telegram often shows a video message as just a poster <img> + a duration
   // badge until the real <video> element mounts (on scroll-into-view/play) —
@@ -217,9 +285,10 @@ function buildItemFromElement(el: HTMLVideoElement | HTMLImageElement, wrapper: 
   // the same id and overwrite each other in storage (only the last one
   // survived). The src itself is always unique per item, so fold a short
   // hash of it into the id regardless of whether a shared mid was found.
-  const mid = wrapper.closest("[data-mid], [data-message-id]")?.getAttribute("data-mid")
-    ?? wrapper.closest("[data-mid], [data-message-id]")?.getAttribute("data-message-id")
-    ?? undefined;
+  const mid =
+    wrapper.closest("[data-mid], [data-message-id]")?.getAttribute("data-mid") ??
+    wrapper.closest("[data-mid], [data-message-id]")?.getAttribute("data-message-id") ??
+    undefined;
 
   const id = idFor(src, mid, index);
   return {
@@ -245,7 +314,11 @@ function extractMediaFromMessage(wrapper: Element, allowWebm = true): Downloadab
  * only ever surfaced a button for photo #1. Finds every media element in the wrapper, deduped so a
  * video's own poster `<img>` (nested inside the same container) isn't double-counted as a second item.
  */
-function extractAllMediaFromMessage(wrapper: Element, allowWebm: boolean): Array<{ el: HTMLVideoElement | HTMLImageElement; item: DownloadableItem }> {
+export function extractAllMediaFromMessage(
+  wrapper: Element,
+  allowWebm: boolean,
+  withThumbnail = true,
+): Array<{ el: HTMLVideoElement | HTMLImageElement; item: DownloadableItem }> {
   const videos = Array.from(wrapper.querySelectorAll("video"));
   const imgs = Array.from(wrapper.querySelectorAll("img")).filter(
     (img) => !videos.some((video) => video.parentElement?.contains(img)),
@@ -253,7 +326,7 @@ function extractAllMediaFromMessage(wrapper: Element, allowWebm: boolean): Array
 
   const results: Array<{ el: HTMLVideoElement | HTMLImageElement; item: DownloadableItem }> = [];
   [...videos, ...imgs].forEach((el, index) => {
-    const item = buildItemFromElement(el, wrapper, allowWebm, index);
+    const item = buildItemFromElement(el, wrapper, allowWebm, index, withThumbnail);
     if (item) results.push({ el, item });
   });
   return results;
@@ -271,11 +344,29 @@ const itemByContainer = new WeakMap<HTMLElement, DownloadableItem>();
 /** Cluster media elements that already have their own overlay download button — skip re-adding one every scan tick. */
 const processedClusterElements = new WeakSet<Element>();
 
-function injectSingleInlineButton(wrapper: Element, item: DownloadableItem, onDownload: (item: DownloadableItem) => void): void {
+/**
+ * Places a full-width control directly under a message's media. The scan root is now `.Message` /
+ * `.bubble` — a flex *row* (avatar column + content column), so appending a `width:100%` child straight
+ * to it renders the control *beside* the media, not below it. Drop it into the bubble's own content
+ * container (found from the media element's ancestry) instead; only if that can't be located do we fall
+ * back to the root.
+ */
+function appendBelowMedia(root: Element, mediaEl: Element, node: HTMLElement): void {
+  const content = mediaEl.closest(".message-content, .bubble-content, .content-inner");
+  (content ?? root).appendChild(node);
+}
+
+function injectSingleInlineButton(
+  wrapper: Element,
+  mediaEl: HTMLVideoElement | HTMLImageElement,
+  item: DownloadableItem,
+  onDownload: (item: DownloadableItem) => void,
+): void {
   const existingContainer = wrapper.querySelector<HTMLElement>(".tgdl-inline-download");
   if (existingContainer) {
     const previous = itemByContainer.get(existingContainer);
     if (previous && (previous.kind !== item.kind || previous.videoUrl !== item.videoUrl)) {
+      item.thumbnailDataUrl ??= captureThumbnail(mediaEl);
       itemByContainer.set(existingContainer, item);
       void catalogItem(item);
       const button = existingContainer.querySelector("button");
@@ -284,6 +375,7 @@ function injectSingleInlineButton(wrapper: Element, item: DownloadableItem, onDo
     return;
   }
 
+  item.thumbnailDataUrl ??= captureThumbnail(mediaEl);
   void catalogItem(item);
 
   const container = document.createElement("div");
@@ -303,7 +395,7 @@ function injectSingleInlineButton(wrapper: Element, item: DownloadableItem, onDo
 
   itemByContainer.set(container, item);
   container.appendChild(button);
-  wrapper.appendChild(container);
+  appendBelowMedia(wrapper, mediaEl, container);
 }
 
 /** Grouped/album message: one small overlay ⬇ button per thumbnail, plus a "Download all" button for the whole group. */
@@ -314,9 +406,13 @@ function injectClusterButtons(
   onDownloadAll: (items: DownloadableItem[]) => void,
 ): void {
   for (const { el, item } of found) {
-    void catalogItem(item);
+    // Only touch storage/badge the first time we see each cluster element — this loop reran for every
+    // album item on every 3s scan, firing a storage read+write+message each time.
     if (processedClusterElements.has(el)) continue;
     processedClusterElements.add(el);
+
+    item.thumbnailDataUrl ??= captureThumbnail(el);
+    void catalogItem(item);
 
     const anchor = el.parentElement ?? el;
     if (getComputedStyle(anchor).position === "static") anchor.style.position = "relative";
@@ -349,7 +445,7 @@ function injectClusterButtons(
       event.stopPropagation();
       onDownloadAll(found.map((f) => f.item));
     });
-    wrapper.appendChild(allButton);
+    appendBelowMedia(wrapper, found[0]!.el, allButton);
   }
 }
 
@@ -364,18 +460,30 @@ export function injectMessageDownloadButtons(
   onDownload: (item: DownloadableItem) => void,
   onDownloadAll: (items: DownloadableItem[]) => void,
   allowWebm: boolean,
-): void {
-  const { messageWrapperClass } = VERSION_CONFIG[version];
-  for (const wrapper of Array.from(document.getElementsByClassName(messageWrapperClass))) {
-    const found = extractAllMediaFromMessage(wrapper, allowWebm);
+): ScanResult {
+  const roots = findMessageRoots(version);
+  let mediaFound = 0;
+  for (const wrapper of roots) {
+    // No thumbnail capture here — this runs for every message every 3s scan, and the canvas
+    // `toDataURL` was the bulk of the cost. The inject helpers grab a thumbnail lazily, once, only
+    // when they actually catalog a (new or changed) item.
+    const found = extractAllMediaFromMessage(wrapper, allowWebm, false);
     if (found.length === 0) continue;
+    mediaFound += found.length;
 
     if (found.length === 1) {
-      injectSingleInlineButton(wrapper, found[0]!.item, onDownload);
+      injectSingleInlineButton(wrapper, found[0]!.el, found[0]!.item, onDownload);
     } else {
       injectClusterButtons(wrapper as HTMLElement, found, onDownload, onDownloadAll);
     }
   }
+  return { roots: roots.length, mediaFound };
+}
+
+/** Per-scan tallies so the content script can notice "found message roots but extracted 0 media" — the signature of a Telegram DOM change slipping past every selector — and warn instead of failing silently. */
+export interface ScanResult {
+  roots: number;
+  mediaFound: number;
 }
 
 /**
@@ -383,7 +491,11 @@ export function injectMessageDownloadButtons(
  * item gets rendered into the DOM at least once and cataloged. Bounded to
  * avoid an infinite loop if the "next" button never disables/disappears.
  */
-export async function catalogMediaAlbum(version: TelegramVersion, openViewerButton: HTMLElement, maxItems = 200): Promise<void> {
+export async function catalogMediaAlbum(
+  version: TelegramVersion,
+  openViewerButton: HTMLElement,
+  maxItems = 200,
+): Promise<void> {
   const { containerSelector, nextButtonSelector } = VERSION_CONFIG[version].mediaViewer;
   openViewerButton.click();
   await new Promise((r) => setTimeout(r, 2000));
@@ -424,7 +536,9 @@ export async function injectSharedMediaPanelButtons(
     styleDownloadButton(bulkButton);
     bulkButton.style.margin = "6px";
     bulkButton.addEventListener("click", () => {
-      const found = items.map((item) => extractMediaFromMessage(item, allowWebm)).filter((x): x is DownloadableItem => Boolean(x));
+      const found = items
+        .map((item) => extractMediaFromMessage(item, allowWebm))
+        .filter((x): x is DownloadableItem => Boolean(x));
       onDownload(found);
     });
     panel.appendChild(bulkButton);
