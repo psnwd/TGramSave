@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="public/icons/logo.png" alt="TGramSave logo" width="120" height="120">
+  <img src="extension/public/icons/logo.png" alt="TGramSave logo" width="120" height="120">
 
   # TGramSave
 
@@ -43,29 +43,38 @@ Not on the Chrome Web Store. Load it as an unpacked extension:
 ```bash
 git clone https://github.com/psnwd/TGramSave.git
 cd TGramSave
-make install   # or: bun install
-make build     # or: bun run build
+make ext-install   # or: cd extension && bun install
+make ext-build     # or: cd extension && bun run build
 ```
 
 Then in Chrome, Edge or Brave:
 
 1. Open `chrome://extensions`
 2. Turn on **Developer mode** (top right)
-3. Click **Load unpacked** and pick the `dist` folder
+3. Click **Load unpacked** and pick the `extension/dist/chrome` folder
+
+Firefox (128+): `bun run build:firefox` (inside `extension/`), then open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** and pick `extension/dist/firefox/manifest.json`.
 
 After every rebuild, reload the extension from `chrome://extensions` and hard-refresh any open `web.telegram.org` tabs so they pick up the new content scripts.
 
 ## Development
 
+The repo has two parts: [`extension/`](extension) (the browser extension) and [`backend/`](backend) (optional Go + SQLite server for the Premium tier, see its [README](backend/README.md)). Run extension commands from the root with the `ext-` prefix, or `cd extension` and use `bun run`.
+
 ```bash
-make dev        # Vite dev build, watches src/ and rebuilds into dist/
-make typecheck  # vue-tsc --noEmit only
-make build      # type-check, then production build into dist/
-make package    # build, then zip dist/ into tgramsave.zip
-make icons      # regenerate public/icons/{16,32,48,128}.png from a master.png
+make ext-dev        # Vite dev build, watches extension/src/ and rebuilds into extension/dist/
+make ext-typecheck  # vue-tsc --noEmit only
+make ext-build      # type-check, then production builds into extension/dist/chrome and extension/dist/firefox
+make ext-package    # build, then zip into extension/dist/chrome.zip and extension/dist/firefox.zip
+make ext-icons      # regenerate extension/public/icons/{16,32,48,128}.png from a master.png
+make backend-run    # run the Go backend (needs KOFI_VERIFICATION_TOKEN)
+make backend-test   # go vet + go test
 ```
 
-`make` just wraps the matching `bun run <script>` commands (see the [Makefile](Makefile)), so plain `bun` or `npm` works too.
+The `ext-` targets wrap the matching `bun run <script>` commands (see [extension/Makefile](extension/Makefile)), so plain `bun` or `npm` inside `extension/` works too. Load unpacked from `extension/dist/chrome`.
+
+### Premium (optional)
+Free-only by default. To enable, deploy `backend/`, then set `BACKEND_URL` and `KOFI_URL` in `extension/src/config.ts` and follow the Premium checklist in [extension/STORE_SUBMISSION.md](extension/STORE_SUBMISSION.md).
 
 Lint and format run through [Biome](https://biomejs.dev) (config in [`biome.json`](biome.json)):
 
@@ -80,15 +89,15 @@ CI is in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). It runs `biome 
 
 ## How it works
 
-`src/content-script/` runs in Telegram's isolated content-script world. It scans the DOM for media messages, injects the download buttons, and records what it finds in `chrome.storage` for the popup.
+`extension/src/content-script/` runs in Telegram's isolated content-script world. It scans the DOM for media messages, injects the download buttons, and records what it finds in `chrome.storage` for the popup.
 
-`src/content-script-inject/` runs in the page's own MAIN world (declared with `world: "MAIN"` in the manifest). It needs same-origin access to Telegram's `blob:` and streaming URLs, which an isolated content script can't touch reliably. It does the byte-range fetching, reassembly and `<a download>` trigger.
+`extension/src/content-script-inject/` runs in the page's own MAIN world (declared with `world: "MAIN"` in the manifest). It needs same-origin access to Telegram's `blob:` and streaming URLs, which an isolated content script can't touch reliably. It does the byte-range fetching, reassembly and `<a download>` trigger.
 
-`src/channel-downloader/` is the whole-channel scroll-and-download feature.
+`extension/src/channel-downloader/` is the whole-channel scroll-and-download feature.
 
-`src/background/` is the MV3 service worker. It passes messages between the content scripts and the popup, and keeps the toolbar badge count.
+`extension/src/background/` is the MV3 service worker. It passes messages between the content scripts and the popup, and keeps the toolbar badge count.
 
-`src/popup/` is the Vue 3 and Element Plus popup UI, with Download, Channel and Settings tabs.
+`extension/src/popup/` is the Vue 3 and Element Plus popup UI, with Download, Channel and Settings tabs.
 
 ## Permissions
 

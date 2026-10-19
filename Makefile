@@ -1,31 +1,15 @@
-.PHONY: help install dev build typecheck clean package icons
+.PHONY: help ext-% backend-run backend-test
 
 help:
-	@echo "make install    - bun install"
-	@echo "make dev        - start Vite dev build (watches src/, loads unpacked from dist/)"
-	@echo "make build      - type-check then produce a production build in dist/"
-	@echo "make typecheck  - vue-tsc --noEmit only"
-	@echo "make icons      - regenerate public/icons/{16,32,48,128}.png from master.png (or existing 128.png)"
-	@echo "make clean      - remove dist/"
-	@echo "make package    - build, then zip dist/ into tgramsave.zip"
+	@echo "Extension (delegates to extension/Makefile):  make ext-<target>   e.g. make ext-dev, ext-build, ext-package"
+	@echo "make backend-run   - run Go backend (needs KOFI_VERIFICATION_TOKEN, optional ADMIN_TOKEN)"
+	@echo "make backend-test  - go vet + go test"
 
-install:
-	bun install
+ext-%:
+	"$(MAKE)" -C extension $*
 
-dev:
-	bun run dev
+backend-run:
+	cd backend && go run ./cmd/tgsd
 
-build:
-	bun run build
-
-typecheck:
-	bun run typecheck
-
-icons:
-	node scripts/generate-icons.mjs
-
-clean:
-	node -e "require('fs').rmSync('dist', { recursive: true, force: true })"
-
-package: build
-	powershell -NoProfile -Command "Compress-Archive -Path 'dist/*' -DestinationPath 'tgramsave.zip' -Force"
+backend-test:
+	cd backend && go vet ./... && go test ./...
