@@ -1,0 +1,4 @@
+{
+  "name": { "message": "TGramSave - Telegram 動画ダウンローダー" },
+  "desc": { "message": "Telegram のチャンネルやグループ（非公開を含む）からワンクリックで動画をダウンロードできる無料拡張機能です。" }
+}

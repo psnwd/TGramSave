@@ -1,0 +1,30 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://tgs:tgs@db:5432/tgs?sslmode=disable
+      KOFI_VERIFICATION_TOKEN: ${KOFI_VERIFICATION_TOKEN:?set KOFI_VERIFICATION_TOKEN}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # Set to the header your proxy sets (e.g. Fly-Client-IP) when deploying behind one.
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-}
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tgs
+      POSTGRES_PASSWORD: tgs
+      POSTGRES_DB: tgs
+    volumes:
+      - tgs-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tgs -d tgs"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  tgs-db:

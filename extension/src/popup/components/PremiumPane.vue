@@ -5,11 +5,15 @@ import { ElMessage } from "element-plus";
 import { Copy, Crown, ExternalLink } from "@lucide/vue";
 import { FREE_DAILY_LIMIT, KOFI_URL } from "@/config";
 import { getPlans, type Plan } from "@/lib/premium";
+import { useI18n } from "../composables/useI18n";
 import { usePremium } from "../composables/usePremium";
 
+const { t } = useI18n();
 const { state, used, premium, refresh } = usePremium();
 const plans = ref<Plan[]>([]);
 const email = ref("");
+/** Ko-fi transaction id from the receipt — proof of ownership; email alone is no longer accepted by default. */
+const txn = ref("");
 const busy = ref(false);
 let poll: ReturnType<typeof setInterval> | undefined;
 
@@ -22,7 +26,7 @@ onUnmounted(() => clearInterval(poll));
 async function copyCode(): Promise<void> {
   if (!state.value) return;
   await navigator.clipboard.writeText(state.value.code).catch(() => undefined);
-  ElMessage({ message: "Code copied. Paste it in the Ko-fi message box.", type: "success" });
+  ElMessage({ message: t("premium.copied"), type: "success" });
 }
 
 /** After opening Ko-fi, re-check every 5s for ~2 min so the unlock appears without reopening the popup. */
@@ -39,44 +43,53 @@ function openKofi(): void {
 async function claim(): Promise<void> {
   busy.value = true;
   try {
-    await refresh(email.value.trim());
-    ElMessage(premium.value ? { message: "Premium activated!", type: "success" } : { message: "No unclaimed payment found for that email.", type: "warning" });
+    await refresh(email.value.trim(), txn.value.trim());
+    ElMessage(
+      premium.value
+        ? { message: t("premium.activated"), type: "success" }
+        : { message: t("premium.notFound"), type: "warning" },
+    );
   } catch {
-    ElMessage({ message: "Could not claim right now. Try again later.", type: "error" });
+    ElMessage({ message: t("premium.claimError"), type: "error" });
   } finally {
     busy.value = false;
   }
 }
 
 const until = () =>
-  state.value?.lifetime ? "Lifetime" : state.value?.expiresAt ? `Until ${new Date(state.value.expiresAt * 1000).toLocaleDateString()}` : "";
+  state.value?.lifetime
+    ? t("premium.lifetime")
+    : state.value?.expiresAt
+      ? t("premium.until", { date: new Date(state.value.expiresAt * 1000).toLocaleDateString() })
+      : "";
 </script>
 
 <template>
   <div class="premium">
-    <div v-if="premium" class="status is-premium"><Crown :size="16" /> Premium · {{ until() }}</div>
-    <div v-else class="status">Free · {{ Math.min(used, FREE_DAILY_LIMIT) }}/{{ FREE_DAILY_LIMIT }} downloads today</div>
+    <div v-if="premium" class="status is-premium"><Crown :size="16" /> {{ t("premium.statusPremium") }} · {{ until() }}</div>
+    <div v-else class="status">{{ t("premium.statusFree", { used: Math.min(used, FREE_DAILY_LIMIT), limit: FREE_DAILY_LIMIT }) }}</div>
 
     <template v-if="!premium">
-      <p class="lead">Unlimited downloads, batch &amp; ZIP, and the Channel downloader.</p>
+      <p class="lead">{{ t("premium.lead") }}</p>
       <ul v-if="plans.length" class="plans">
         <li v-for="p in plans" :key="p.key"><span>{{ p.name }}</span><b>{{ p.price }}</b></li>
       </ul>
 
       <ol class="steps">
         <li>
-          Copy your code
+          {{ t("premium.step1") }}
           <el-button size="small" :disabled="!state" @click="copyCode"><Copy :size="12" />{{ state?.code ?? "…" }}</el-button>
         </li>
-        <li>Open Ko-fi, pick a plan, and paste the code in the <i>message</i> box.</li>
-        <li>This tab unlocks automatically once the payment arrives.</li>
+        <li>{{ t("premium.step2") }}</li>
+        <li>{{ t("premium.step3") }}</li>
       </ol>
-      <el-button type="primary" @click="openKofi"><ExternalLink :size="14" />Upgrade on Ko-fi</el-button>
+      <el-button type="primary" @click="openKofi"><ExternalLink :size="14" />{{ t("premium.upgrade") }}</el-button>
 
       <div class="claim">
-        <p>Already paid, or reinstalled? Enter the email you used on Ko-fi.</p>
+        <p>{{ t("premium.claimLead") }}</p>
         <el-input v-model="email" size="small" placeholder="you@example.com" type="email" />
-        <el-button size="small" :loading="busy" :disabled="!email" @click="claim">Restore</el-button>
+        <el-input v-model="txn" size="small" :placeholder="t('premium.txnPlaceholder')" />
+        <el-button size="small" :loading="busy" :disabled="!email || !txn" @click="claim">{{ t("premium.restore") }}</el-button>
       </div>
     </template>
   </div>

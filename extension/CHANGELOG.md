@@ -4,7 +4,33 @@
 
 ### Added
 
-- **Optional Premium tier** (Ko-fi + Go backend in `/backend`). Off by default: with `BACKEND_URL`/`KOFI_URL` empty in `src/config.ts` the extension behaves exactly as before. When enabled: free = 10 single downloads/day; Premium = unlimited, batch/ZIP and the Channel downloader. New Premium tab (activation code, plans from the server, restore by email).
+- **Optional Premium tier** (Ko-fi + Go backend in `/backend`). Off by default: with `BACKEND_URL`/`KOFI_URL` empty in `src/config.ts` the extension behaves exactly as before. When enabled: free = 10 single downloads/day; Premium = unlimited, batch/ZIP and the Channel downloader. New Premium tab (activation code, plans from the server, restore by transaction id).
+- **Unit and DOM-fixture tests** (Vitest + happy-dom) for range math, filenames, caps, catalog ids, URL guards, Premium rules, and album/avatar/preview extraction; CI runs them.
+- **CI hardening**: extension job runs in `extension/`, secret scanning (gitleaks), a Postgres backend job, and manifest verification after every build.
+- **Backend readiness and metrics**: `GET /readyz`, admin-only counters, structured request logs, and transaction-id proof for claiming payments.
+- **JSON-based UI localization**: 14 locales (`en`, `zh-CN`, `zh-TW`, `es`, `fr`, `de`, `pt-BR`, `ru`, `ja`, `ko`, `it`, `tr`, `ar`, `hi`), a language selector in Settings, localized manifest name/description, and English fallback for partial translations. English, Simplified/Traditional Chinese, and Spanish are complete; the other locales cover the core UI and fall back to English for long-tail strings. Add a language by dropping `src/locales/<code>.json` next to the others.
+
+### Changed
+
+- **One isolated content script** now hosts both the catalog/inline-button scanner and the channel runner, so `catalog.ts` is bundled once and exactly one listener owns the save bridge.
+- **Observer-driven scanning** replaces the 3-second full-DOM poll: media/message mutations, settled scrolls, and a slow reconciliation timer; no work while the tab is hidden.
+- **Bounded batch downloads** (3 concurrent) and **streamed ZIP assembly** (async, store mode for media, 2 GiB guard) reduce memory spikes on large runs.
+- **Storage growth is capped**: 400 items/chat, 150 thumbnails, 20 chats, with quota fallback and startup pruning.
+- **Popup no longer navigates the current tab**; it offers an "Open Telegram Web" action instead.
+- **Tab panes are lazy-mounted**, so the Channel scroll watcher only runs while that tab is open.
+- Accessibility: tab roles/arrow-key navigation, aria labels, focus-visible, and reduced-motion support; shared strings moved into a small `t()` table.
+- Settings now carry a schema version and deep-merge nested channel options.
+
+### Fixed
+
+- **Album items no longer disappear** from the catalog: storage writes are serialized and batched.
+- **Clear All stays cleared** instead of being repopulated by the next scan.
+- **Channel Stop/Resume**: Stop no longer looks like "Done", the checkpoint is kept for Resume, ZIP runs report queued counts, and in-flight fetches are aborted.
+- **No silent truncation** when a `206` response omits the Range total; partial probes fall back to a full fetch.
+- **No shared-media observer leak**; Force Download now catalogs even with inline buttons disabled.
+- **Downloads report failures** to the popup (failed row + toast) instead of only the console; retries cover network errors, 429 and 5xx with backoff and `Retry-After`.
+- **Save fallback** works when the isolated relay is unavailable (e.g. channel feature disabled).
+- **Download bridge hardening**: non-Telegram URLs are rejected and filenames/paths are sanitized before `chrome.downloads`.
 
 ## 1.1.1 — 2026-09-04
 

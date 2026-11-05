@@ -12,10 +12,12 @@ import type {
   ChannelDownloadLimits,
   ChannelDownloadOptions,
 } from "@/types/messages";
+import { useI18n } from "../composables/useI18n";
 import { usePremium } from "../composables/usePremium";
 
 const emit = defineEmits<{ upgrade: [] }>();
 const { deny } = usePremium();
+const { t } = useI18n();
 
 const status = ref("Checking page…");
 const found = ref(0);
@@ -58,11 +60,11 @@ function toCap(v: string): number {
 
 const limitSummary = computed(() => {
   const parts: string[] = [];
-  if (toCap(videoLimit.value)) parts.push(`${toCap(videoLimit.value)} video`);
-  if (toCap(imageLimit.value)) parts.push(`${toCap(imageLimit.value)} image`);
-  if (toCap(documentLimit.value)) parts.push(`${toCap(documentLimit.value)} doc`);
-  if (toCap(totalLimit.value)) parts.push(`${toCap(totalLimit.value)} total`);
-  return parts.length ? `Limit: ${parts.join(" · ")}` : "No limit — whole channel";
+  if (toCap(videoLimit.value)) parts.push(t("channel.countVideo", { n: toCap(videoLimit.value) }));
+  if (toCap(imageLimit.value)) parts.push(t("channel.countImage", { n: toCap(imageLimit.value) }));
+  if (toCap(documentLimit.value)) parts.push(t("channel.countDocument", { n: toCap(documentLimit.value) }));
+  if (toCap(totalLimit.value)) parts.push(t("channel.countTotal", { n: toCap(totalLimit.value) }));
+  return parts.length ? t("channel.limitSummary", { parts: parts.join(" · ") }) : t("channel.noLimit");
 });
 
 function currentLimits(): ChannelDownloadLimits {
@@ -87,7 +89,7 @@ async function hasDownloadsPermission(): Promise<boolean> {
 
 /** Same 6s safety net added this session: a silent stall anywhere in the chain surfaces a message instead of hanging on "Checking page…" forever. */
 async function checkPage(): Promise<void> {
-  status.value = "Checking page…";
+  status.value = t("channel.checking");
   found.value = 0;
   downloaded.value = 0;
 
@@ -95,7 +97,7 @@ async function checkPage(): Promise<void> {
   const timeout = setTimeout(() => {
     if (settled) return;
     settled = true;
-    status.value = "No response from page — try reloading the Telegram tab";
+    status.value = t("channel.noResponse");
   }, 6000);
   const finish = (message: string) => {
     if (settled) return;
@@ -107,7 +109,7 @@ async function checkPage(): Promise<void> {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   if (!tab?.url?.includes("web.telegram.org")) {
     notOnTelegram.value = true;
-    finish("Not on Telegram");
+    finish(t("channel.statusNotOnTelegram"));
     return;
   }
   notOnTelegram.value = false;
@@ -115,7 +117,7 @@ async function checkPage(): Promise<void> {
 
   if (!(await hasDownloadsPermission())) {
     permissionMissing.value = true;
-    finish("⚠ Downloads permission missing");
+    finish(`⚠ ${t("channel.permissionMissing")}`);
     return;
   }
   permissionMissing.value = false;
@@ -125,15 +127,15 @@ async function checkPage(): Promise<void> {
       | ChannelDlCheckPageResponse
       | undefined;
     if (!pageInfo) {
-      finish("Could not reach page — reload Telegram");
+      finish(t("channel.couldNotReach"));
       return;
     }
     channelTitle.value = pageInfo.channelTitle;
     currentChannelKey = pageInfo.channelKey;
     savedCheckpoint.value = currentChannelKey ? await getCheckpoint(currentChannelKey) : null;
-    finish("Ready");
+    finish(t("channel.ready"));
   } catch {
-    finish("Could not reach page — reload Telegram");
+    finish(t("channel.couldNotReach"));
     return;
   }
 
@@ -146,7 +148,7 @@ async function checkPage(): Promise<void> {
       paused.value = statusInfo.paused;
       found.value = statusInfo.found;
       downloaded.value = statusInfo.downloaded;
-      finish(statusInfo.paused ? "Paused" : "Running…");
+      finish(statusInfo.paused ? t("channel.paused") : t("channel.running"));
       return;
     }
   } catch {
@@ -207,14 +209,14 @@ async function start(resume = false): Promise<void> {
     return;
   }
   if (!includeVideo.value && !includeImage.value && !includeDocument.value) {
-    status.value = "⚠ Select at least one media type";
+    status.value = t("channel.selectMediaType");
     return;
   }
   running.value = true;
   paused.value = false;
   found.value = 0;
   downloaded.value = 0;
-  status.value = "Starting…";
+  status.value = t("channel.starting");
 
   const limits = currentLimits();
   const videoDuration = { min: toCap(minVideoSecs.value), max: toCap(maxVideoSecs.value) };
@@ -300,47 +302,47 @@ onUnmounted(() => {
 
 <template>
   <div class="channel-pane">
-    <p class="beta-note"><TriangleAlert :size="14" /> Beta — whole-channel download is still being worked on and may be unreliable on large chats.</p>
-    <p v-if="notOnTelegram" class="warning"><TriangleAlert :size="14" /> Open web.telegram.org and select a chat first.</p>
-    <p v-if="permissionMissing" class="warning"><TriangleAlert :size="14" /> Downloads permission is missing — reinstall the extension.</p>
-    <p v-if="channelTitle" class="channel-name">Channel: {{ channelTitle }}</p>
+    <p class="beta-note"><TriangleAlert :size="14" /> {{ t("channel.beta") }}</p>
+    <p v-if="notOnTelegram" class="warning"><TriangleAlert :size="14" /> {{ t("channel.notOnTelegram") }}</p>
+    <p v-if="permissionMissing" class="warning"><TriangleAlert :size="14" /> {{ t("channel.permissionMissing") }}</p>
+    <p v-if="channelTitle" class="channel-name">{{ t("channel.title", { name: channelTitle }) }}</p>
 
     <div class="field">
-      <label>Save folder (optional)</label>
-      <el-input v-model="folder" placeholder="e.g. TelegramMedia" />
+      <label>{{ t("channel.saveFolder") }}</label>
+      <el-input v-model="folder" :placeholder="t('channel.saveFolderPlaceholder')" />
     </div>
 
     <div class="field limits">
-      <label>Media types &amp; limits <span class="opt">— blank = download all</span></label>
+      <label>{{ t("channel.mediaTypesLimits") }} <span class="opt">{{ t("channel.blankDownloadAll") }}</span></label>
       <div class="limit-grid" :class="{ 'is-locked': running }">
         <div class="limit-row">
-          <el-checkbox v-model="includeVideo" :disabled="running">Videos</el-checkbox>
+          <el-checkbox v-model="includeVideo" :disabled="running">{{ t("channel.videos") }}</el-checkbox>
           <el-input
-            :model-value="videoLimit" size="small" placeholder="All" clearable inputmode="numeric"
+            :model-value="videoLimit" size="small" :placeholder="t('channel.all')" clearable inputmode="numeric"
             :disabled="running || !includeVideo"
             @update:model-value="videoLimit = sanitizeLimit($event)"
           />
         </div>
         <div class="limit-row">
-          <el-checkbox v-model="includeImage" :disabled="running">Images</el-checkbox>
+          <el-checkbox v-model="includeImage" :disabled="running">{{ t("channel.images") }}</el-checkbox>
           <el-input
-            :model-value="imageLimit" size="small" placeholder="All" clearable inputmode="numeric"
+            :model-value="imageLimit" size="small" :placeholder="t('channel.all')" clearable inputmode="numeric"
             :disabled="running || !includeImage"
             @update:model-value="imageLimit = sanitizeLimit($event)"
           />
         </div>
         <div class="limit-row">
-          <el-checkbox v-model="includeDocument" :disabled="running">Documents</el-checkbox>
+          <el-checkbox v-model="includeDocument" :disabled="running">{{ t("channel.documents") }}</el-checkbox>
           <el-input
-            :model-value="documentLimit" size="small" placeholder="All" clearable inputmode="numeric"
+            :model-value="documentLimit" size="small" :placeholder="t('channel.all')" clearable inputmode="numeric"
             :disabled="running || !includeDocument"
             @update:model-value="documentLimit = sanitizeLimit($event)"
           />
         </div>
         <div class="limit-row total">
-          <span class="total-label">Total cap</span>
+          <span class="total-label">{{ t("channel.totalCap") }}</span>
           <el-input
-            :model-value="totalLimit" size="small" placeholder="All" clearable inputmode="numeric"
+            :model-value="totalLimit" size="small" :placeholder="t('channel.all')" clearable inputmode="numeric"
             :disabled="running"
             @update:model-value="totalLimit = sanitizeLimit($event)"
           />
@@ -350,72 +352,80 @@ onUnmounted(() => {
     </div>
 
     <div v-if="includeVideo" class="field duration-field">
-      <label>Video length filter <span class="opt">— seconds, blank = any length</span></label>
+      <label>{{ t("channel.durationFilter") }}</label>
       <div class="duration-row">
-        <span class="dur-label">Min</span>
+        <span class="dur-label">{{ t("channel.min") }}</span>
         <el-input
-          :model-value="minVideoSecs" size="small" placeholder="Any" clearable inputmode="numeric"
+          :model-value="minVideoSecs" size="small" :placeholder="t('channel.any')" clearable inputmode="numeric"
           :disabled="running"
           @update:model-value="minVideoSecs = sanitizeLimit($event)"
         />
-        <span class="dur-label">Max</span>
+        <span class="dur-label">{{ t("channel.max") }}</span>
         <el-input
-          :model-value="maxVideoSecs" size="small" placeholder="Any" clearable inputmode="numeric"
+          :model-value="maxVideoSecs" size="small" :placeholder="t('channel.any')" clearable inputmode="numeric"
           :disabled="running"
           @update:model-value="maxVideoSecs = sanitizeLimit($event)"
         />
       </div>
       <p v-if="toCap(minVideoSecs) || toCap(maxVideoSecs)" class="limit-summary">
-        Videos:
-        <template v-if="toCap(minVideoSecs) && toCap(maxVideoSecs)">{{ toCap(minVideoSecs) }}s – {{ toCap(maxVideoSecs) }}s</template>
-        <template v-else-if="toCap(minVideoSecs)">≥ {{ toCap(minVideoSecs) }}s</template>
-        <template v-else>≤ {{ toCap(maxVideoSecs) }}s</template>
-        <span class="opt"> · videos with unknown duration are always included</span>
+        <template v-if="toCap(minVideoSecs) && toCap(maxVideoSecs)">
+          {{ t("channel.durationBetween", { min: toCap(minVideoSecs), max: toCap(maxVideoSecs) }) }}
+        </template>
+        <template v-else-if="toCap(minVideoSecs)">{{ t("channel.durationMin", { min: toCap(minVideoSecs) }) }}</template>
+        <template v-else>{{ t("channel.durationMax", { max: toCap(maxVideoSecs) }) }}</template>
+        <span class="opt"> · {{ t("channel.durationUnknown") }}</span>
       </p>
     </div>
 
     <div class="zip-row">
-      <el-checkbox v-model="zip" :disabled="running">Zip when done</el-checkbox>
+      <el-checkbox v-model="zip" :disabled="running">{{ t("channel.zipWhenDone") }}</el-checkbox>
       <template v-if="zip">
         <el-input
-          :model-value="zipBatchSize" size="small" placeholder="All in one" clearable inputmode="numeric"
+          :model-value="zipBatchSize" size="small" :placeholder="t('channel.allInOne')" clearable inputmode="numeric"
           class="zip-batch-input" :disabled="running"
           @update:model-value="zipBatchSize = sanitizeLimit($event)"
-        /><span class="zip-batch-label">files per zip</span>
+        /><span class="zip-batch-label">{{ t("channel.filesPerZip") }}</span>
       </template>
     </div>
 
     <div class="checkpoint-row">
-      <span class="checkpoint-label">Save checkpoint every</span>
+      <span class="checkpoint-label">{{ t("channel.checkpointEvery") }}</span>
       <el-input
-        :model-value="checkpointEvery" size="small" placeholder="Off" clearable inputmode="numeric"
+        :model-value="checkpointEvery" size="small" :placeholder="t('channel.off')" clearable inputmode="numeric"
         class="checkpoint-input" :disabled="running"
         @update:model-value="checkpointEvery = sanitizeLimit($event)"
       />
-      <span class="checkpoint-label">files</span>
+      <span class="checkpoint-label">{{ t("channel.files") }}</span>
     </div>
 
     <div v-if="savedCheckpoint && !running" class="resume-banner">
-      <span>Checkpoint: {{ savedCheckpoint.totalDownloaded }} downloaded · saved {{ new Date(savedCheckpoint.savedAt).toLocaleTimeString() }}</span>
+      <span>{{ t("channel.checkpointSummary", { downloaded: savedCheckpoint.totalDownloaded, time: new Date(savedCheckpoint.savedAt).toLocaleTimeString() }) }}</span>
       <div class="resume-actions">
-        <el-button size="small" type="primary" @click="start(true)"><Play :size="12" />Resume</el-button>
-        <el-button size="small" @click="savedCheckpoint = null">Discard</el-button>
+        <el-button size="small" type="primary" @click="start(true)"><Play :size="12" />{{ t("channel.resume") }}</el-button>
+        <el-button size="small" @click="savedCheckpoint = null">{{ t("channel.discard") }}</el-button>
       </div>
     </div>
 
     <div class="actions">
-      <el-button type="primary" :disabled="running || notOnTelegram" @click="start"><Play :size="14" />Start</el-button>
+      <el-button type="primary" :disabled="running || notOnTelegram" @click="start"><Play :size="14" />{{ t("channel.start") }}</el-button>
       <el-button v-if="running" @click="togglePause">
-        <component :is="paused ? Play : Pause" :size="14" />{{ paused ? "Resume" : "Pause" }}
+        <component :is="paused ? Play : Pause" :size="14" />{{ paused ? t("channel.resume") : t("channel.pause") }}
       </el-button>
-      <el-button v-if="running" type="danger" plain @click="stop"><Square :size="14" />Stop</el-button>
+      <el-button v-if="running" type="danger" plain @click="stop"><Square :size="14" />{{ t("channel.stop") }}</el-button>
     </div>
 
     <div class="status-box">
       <div class="status-text">{{ status }}</div>
       <div class="counts-row">
-        <span class="counts">Found: {{ found }} &nbsp;&nbsp; Downloaded: {{ downloaded }}</span>
-        <button type="button" class="refresh-btn" :disabled="refreshing || notOnTelegram" title="Re-scan the page" @click="refresh">
+        <span class="counts">{{ t("channel.found") }}: {{ found }} &nbsp;&nbsp; {{ t("channel.downloadedCount") }}: {{ downloaded }}</span>
+        <button
+          type="button"
+          class="refresh-btn"
+          :disabled="refreshing || notOnTelegram"
+          :title="t('channel.reScan')"
+          :aria-label="t('channel.reScan')"
+          @click="refresh"
+        >
           <RefreshCw :size="13" :class="{ spinning: refreshing }" />
         </button>
       </div>

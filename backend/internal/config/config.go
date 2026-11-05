@@ -12,6 +12,9 @@ type Config struct {
 	AdminToken     string // empty disables /admin
 	ClientIPHeader string // e.g. "Fly-Client-IP" or "X-Forwarded-For" when behind a proxy; empty = RemoteAddr
 	DebugWebhooks  bool   // log each Ko-fi payload (token redacted, but it contains emails): debugging only
+	// AllowEmailClaim restores the legacy email-only claim path. Off by default because knowing a
+	// Ko-fi email is not proof of ownership; users should paste the Ko-fi transaction id instead.
+	AllowEmailClaim bool
 }
 
 func env(k, def string) string {
@@ -23,12 +26,13 @@ func env(k, def string) string {
 
 func Load() (Config, error) {
 	c := Config{
-		Addr:           env("ADDR", ":8080"),
-		DB:             env("DATABASE_URL", env("DB_PATH", "tgsd.db")),
-		KofiToken:      os.Getenv("KOFI_VERIFICATION_TOKEN"),
-		AdminToken:     os.Getenv("ADMIN_TOKEN"),
-		ClientIPHeader: os.Getenv("CLIENT_IP_HEADER"),
-		DebugWebhooks:  os.Getenv("DEBUG_WEBHOOKS") == "1",
+		Addr:            env("ADDR", ":8080"),
+		DB:              env("DATABASE_URL", env("DB_PATH", "tgsd.db")),
+		KofiToken:       os.Getenv("KOFI_VERIFICATION_TOKEN"),
+		AdminToken:      os.Getenv("ADMIN_TOKEN"),
+		ClientIPHeader:  os.Getenv("CLIENT_IP_HEADER"),
+		DebugWebhooks:   os.Getenv("DEBUG_WEBHOOKS") == "1",
+		AllowEmailClaim: os.Getenv("ALLOW_EMAIL_CLAIM") == "1",
 	}
 	if c.KofiToken == "" {
 		return c, errors.New("KOFI_VERIFICATION_TOKEN is required")

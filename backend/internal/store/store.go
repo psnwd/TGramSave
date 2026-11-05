@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 const Lifetime int64 = 253402300799
 
 var ErrConflict = errors.New("kofi_match already used by another plan")
+var ErrProofRequired = errors.New("ko-fi transaction id required to claim a payment")
 
 type Plan struct {
 	Key       string `json:"key" gorm:"primaryKey"`
@@ -107,6 +109,15 @@ func (s *Store) Close() error {
 		return err
 	}
 	return d.Close()
+}
+
+// Ping is the readiness check: SQLite/Postgres reachable and accepting queries.
+func (s *Store) Ping(ctx context.Context) error {
+	d, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return d.PingContext(ctx)
 }
 
 func hash(secret string) string {
@@ -226,20 +237,31 @@ func (s *Store) ApplyPayment(p Payment) error {
 	})
 }
 
-// Claim binds unclaimed payments made with this email to the install (reinstall / forgot-to-paste-code path).
-// ponytail: email is the only proof; payments bind once, endpoint is rate-limited. Add emailed OTP if abused.
-func (s *Store) Claim(installID, email string) error {
+// Claim binds unclaimed payments to the install. Proof is the Ko-fi transaction id shown on the receipt;
+// the legacy email-only path is opt-in via ALLOW_EMAIL_CLAIM=1 (someone who knows an email is not the
+// owner). Payments bind once and the endpoint is rate-limited.
+func (s *Store) Claim(installID, email, txn string, allowEmail bool) error {
 	email = strings.ToLower(strings.TrimSpace(email))
+	txn = strings.TrimSpace(txn)
 	if email == "" {
 		return nil
+	}
+	if txn == "" && !allowEmail {
+		return ErrProofRequired
 	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		var cs []struct {
 			MessageID string
 			Days      int
 		}
-		err := tx.Raw(`SELECT p.message_id, pl.days FROM payments p JOIN plans pl ON pl.key = p.plan_key
-			WHERE p.email = ? AND p.install_id IS NULL`, email).Scan(&cs).Error
+		query := `SELECT p.message_id, pl.days FROM payments p JOIN plans pl ON pl.key = p.plan_key
+			WHERE p.email = ? AND p.install_id IS NULL`
+		args := []any{email}
+		if txn != "" {
+			query += ` AND p.kofi_txn = ?`
+			args = append(args, txn)
+		}
+		err := tx.Raw(query, args...).Scan(&cs).Error
 		if err != nil {
 			return err
 		}
@@ -275,8 +297,8 @@ func activate(tx *gorm.DB, installID string, days int, email, msgID string, now 
 	return tx.Model(&dbPayment{}).Where("message_id = ?", msgID).Update("install_id", installID).Error
 }
 
-// Reset drops all tables in the database at dsn. Test helper only.
-func Reset(dsn string) {
+// ResetForTests drops all tables in the database at dsn. Test helper only — never call from production code.
+func ResetForTests(dsn string) {
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Discard})
 	if err != nil {
 		panic(err)

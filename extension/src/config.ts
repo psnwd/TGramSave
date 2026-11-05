@@ -1,7 +1,10 @@
+import pkg from "../package.json";
+
 /** Single source of truth for branding/version/publisher info used across the manifest and popup UI. Edit here, not at each call site. */
 export const APP_NAME = "TGramSave";
 export const APP_TAGLINE = "Save Telegram Videos in One Click";
-export const APP_VERSION = "1.1.1";
+/** Sourced from package.json so the manifest, popup and changelog can't drift. */
+export const APP_VERSION = pkg.version;
 export const APP_DESCRIPTION =
   "Free extension to download videos from Telegram channels and groups, including private ones, in a single click.";
 
@@ -21,7 +24,7 @@ export const ICON_SIZES = {
 
 export const AUTHOR_NAME = "BlackCAT";
 export const AUTHOR_EMAIL = "";
-export const HOMEPAGE_URL = "";
+export const HOMEPAGE_URL = "https://github.com/psnwd/TGramSave";
 
 /**
  * Premium (see /backend). Leave BOTH empty to ship the free-only build: no Premium tab, no gating, no network,

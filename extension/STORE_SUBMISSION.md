@@ -22,6 +22,8 @@ Single targets: `bun run package:chrome`, `bun run package:firefox`. `make packa
 - [ ] Min Firefox 128 (MV3 + content script `world: "MAIN"`). Desktop only tested path; Android not verified.
 
 ## Permissions
+Chrome builds declare `minimum_chrome_version: 111` (MAIN-world content scripts). The popup talks to the active Telegram tab through `chrome.tabs.sendMessage`, covered by the host permission.
+
 | Permission | Why |
 |---|---|
 | `host_permissions: https://web.telegram.org/*` | Content scripts inject download buttons, read media element URLs, and fetch media bytes with the user's Telegram session. |
@@ -41,7 +43,7 @@ Removed vs. 1.1.1: `activeTab` (redundant with host permission), broad `*://*/*`
 ## Premium build (only when `BACKEND_URL` + `KOFI_URL` are set in `src/config.ts`)
 With both empty the build is free-only and everything above ("nothing transmitted", `data_collection_permissions: none`) stays true. Enabling Premium changes the disclosures:
 - [ ] Manifest gains `host_permissions` for the backend origin (automatic). Add to the permissions table: "backend origin: check Premium status / register an anonymous install id."
-- [ ] **Transmitted** to the backend you run: a random install id + secret (generated on first run, no account), the Premium status check, and, only if the user types it into "Restore", their Ko-fi email. Payments themselves are handled by Ko-fi.
+- [ ] **Transmitted** to the backend you run: a random install id + secret (generated on first run, no account), the Premium status check, and, only if the user uses "Restore", their Ko-fi email and transaction id. Payments themselves are handled by Ko-fi. The backend defaults to transaction-id proof; `ALLOW_EMAIL_CLAIM=1` restores legacy email-only restore and is not recommended.
 - [ ] Not sent: Telegram content, media, URLs, usage counts (the free daily counter is local).
 - [ ] Chrome Privacy tab: tick "Website content: no", "Authentication information: no"; "Personally identifiable information": yes only if you keep the email-restore field (email is stored server-side to match payments).
 - [ ] Firefox: build declares `required: ["technicalAndInteraction"]`, `optional: ["personallyIdentifyingInfo"]` automatically. Verify the category names against the current AMO docs before upload.

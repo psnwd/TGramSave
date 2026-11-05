@@ -1,5 +1,5 @@
 import browser from "webextension-polyfill";
-import type { ChannelDownloadLimits } from "@/types/messages";
+import type { ChannelDownloadLimits, DownloadableItem } from "@/types/messages";
 
 export interface DownloadCheckpoint {
   channelKey: string;
@@ -26,6 +26,10 @@ export async function clearCheckpoint(channelKey: string): Promise<void> {
 export type ThemePreference = "light" | "dark" | "system";
 
 export type DownloadSettings = {
+  /** Bumped whenever the stored shape changes; `getSettings` migrates old values in place. */
+  schemaVersion: number;
+  /** Locale code or `system` to follow the browser. */
+  language: string;
   defaultFolder: string;
   video: boolean;
   image: boolean;
@@ -47,7 +51,11 @@ export type DownloadSettings = {
   channelCheckpointEvery: number;
 };
 
+export const SETTINGS_SCHEMA_VERSION = 2;
+
 const DEFAULT_SETTINGS: DownloadSettings = {
+  schemaVersion: SETTINGS_SCHEMA_VERSION,
+  language: "system",
   defaultFolder: "",
   video: true,
   image: true,
@@ -63,9 +71,51 @@ const DEFAULT_SETTINGS: DownloadSettings = {
   channelCheckpointEvery: 0,
 };
 
+const asBool = (value: unknown, fallback: boolean): boolean => (typeof value === "boolean" ? value : fallback);
+const asCount = (value: unknown): number => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+};
+const asTheme = (value: unknown): ThemePreference =>
+  value === "light" || value === "dark" || value === "system" ? value : DEFAULT_SETTINGS.theme;
+
+/** Deep-merges defaults (nested channel options used to be lost when a partial shape was stored) and clamps numbers. */
+function migrateSettings(raw: Partial<DownloadSettings> | undefined): DownloadSettings {
+  const stored = raw ?? {};
+  const limits = { ...DEFAULT_SETTINGS.channelLimits, ...(stored.channelLimits ?? {}) };
+  const duration = { ...DEFAULT_SETTINGS.channelVideoDuration, ...(stored.channelVideoDuration ?? {}) };
+
+  return {
+    schemaVersion: SETTINGS_SCHEMA_VERSION,
+    language: typeof stored.language === "string" ? stored.language : DEFAULT_SETTINGS.language,
+    defaultFolder: typeof stored.defaultFolder === "string" ? stored.defaultFolder : DEFAULT_SETTINGS.defaultFolder,
+    video: asBool(stored.video, DEFAULT_SETTINGS.video),
+    image: asBool(stored.image, DEFAULT_SETTINGS.image),
+    document: asBool(stored.document, DEFAULT_SETTINGS.document),
+    showInlineButtons: asBool(stored.showInlineButtons, DEFAULT_SETTINGS.showInlineButtons),
+    zipByDefault: asBool(stored.zipByDefault, DEFAULT_SETTINGS.zipByDefault),
+    theme: asTheme(stored.theme),
+    downloadWebm: asBool(stored.downloadWebm, DEFAULT_SETTINGS.downloadWebm),
+    buttonsOnPreviews: asBool(stored.buttonsOnPreviews, DEFAULT_SETTINGS.buttonsOnPreviews),
+    channelLimits: {
+      video: asCount(limits.video),
+      image: asCount(limits.image),
+      document: asCount(limits.document),
+      total: asCount(limits.total),
+    },
+    channelVideoDuration: { min: asCount(duration.min), max: asCount(duration.max) },
+    channelZipBatchSize: asCount(stored.channelZipBatchSize),
+    channelCheckpointEvery: asCount(stored.channelCheckpointEvery),
+  };
+}
+
 export async function getSettings(): Promise<DownloadSettings> {
-  const stored = await browser.storage.local.get("settings");
-  return { ...DEFAULT_SETTINGS, ...(stored.settings as Partial<DownloadSettings> | undefined) };
+  const stored = (await browser.storage.local.get("settings")).settings as Partial<DownloadSettings> | undefined;
+  const settings = migrateSettings(stored);
+  if (stored?.schemaVersion !== SETTINGS_SCHEMA_VERSION) {
+    await browser.storage.local.set({ settings });
+  }
+  return settings;
 }
 
 export async function setSettings(settings: DownloadSettings): Promise<void> {
@@ -80,4 +130,59 @@ export async function getVideoList(tabUrlHash: string): Promise<unknown[]> {
 
 export async function clearVideoList(tabUrlHash: string): Promise<void> {
   await browser.storage.local.set({ [`${tabUrlHash}_video_list`]: {} });
+}
+
+/** Per-chat and global caps so a long browsing session cannot fill `storage.local` (which has no `unlimitedStorage`). */
+export const MAX_ITEMS_PER_CHAT = 400;
+export const MAX_CATALOG_CHATS = 20;
+export const MAX_STORED_THUMBNAILS = 150;
+
+/**
+ * Keeps the newest `MAX_ITEMS_PER_CHAT` entries (object insertion order) and drops thumbnails beyond
+ * `MAX_STORED_THUMBNAILS`. Returns true when it changed anything.
+ */
+export function trimCatalogList(list: Record<string, DownloadableItem>): boolean {
+  let changed = false;
+  const ids = Object.keys(list);
+
+  if (ids.length > MAX_ITEMS_PER_CHAT) {
+    for (const id of ids.slice(0, ids.length - MAX_ITEMS_PER_CHAT)) {
+      delete list[id];
+      changed = true;
+    }
+  }
+
+  let thumbnails = Object.values(list).filter((item) => item.thumbnailDataUrl).length;
+  if (thumbnails > MAX_STORED_THUMBNAILS) {
+    for (const item of Object.values(list)) {
+      if (thumbnails <= MAX_STORED_THUMBNAILS) break;
+      if (item.thumbnailDataUrl) {
+        delete item.thumbnailDataUrl;
+        thumbnails--;
+        changed = true;
+      }
+    }
+  }
+
+  return changed;
+}
+
+/** Best-effort startup cleanup for every chat list plus old chat keys. Never throws. */
+export async function pruneCatalogStorage(): Promise<void> {
+  try {
+    const all = await browser.storage.local.get(null);
+    const keys = Object.keys(all).filter((key) => key.endsWith("_video_list"));
+
+    for (const key of keys) {
+      const list = all[key] as Record<string, DownloadableItem> | undefined;
+      if (!list || typeof list !== "object") continue;
+      if (trimCatalogList(list)) await browser.storage.local.set({ [key]: list });
+    }
+
+    if (keys.length > MAX_CATALOG_CHATS) {
+      await browser.storage.local.remove(keys.slice(0, keys.length - MAX_CATALOG_CHATS));
+    }
+  } catch (err) {
+    console.warn("[tgdl] catalog storage prune failed:", err);
+  }
 }

@@ -18,6 +18,8 @@ export const createManifest = (target: Target, dev = false) =>
     description: "__MSG_desc__",
     default_locale: "en",
     version: APP_VERSION,
+    // `world: "MAIN"` content scripts landed in Chrome 111; older Chrome ignores the field silently.
+    ...(target === "chrome" ? { minimum_chrome_version: "111" } : {}),
     ...(dev
       ? {
           key: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkfuSNkl5sXohciPOYp75MVNdTCGKVhbNzx++ugzOXwbi/8lAQUvJ6JOR9DxRkvKioCV4A/Hi1IerE6ZQ/qFCMP4zujtr917bAyZ7rxSqx/OqTSafp/NC6dAY4zlUfu2UIdJnyRlcxPeklGkPtqB2wnqTidx2azTp816T06VPuszDio4coEpdiQq6B0iG0x9/11jUVhM145ch/Q//DLrkF9zkmOXFoinT2Ai2fT/g2JkhSKebFxQNGOCO6oOgN3TsVkYrDWv/BiLTgX621TN30Viny2TOxxYxxPMASlD5Xc5I4K4qlVTwvqqTRJG18PacKKvmCtxLk4/M4Oj3Cp5EcQIDAQAB",
@@ -60,11 +62,6 @@ export const createManifest = (target: Target, dev = false) =>
         js: ["src/content-script/index.ts"],
         run_at: "document_end",
       },
-      {
-        matches: ["https://web.telegram.org/*"],
-        js: ["src/channel-downloader/index.ts"],
-        run_at: "document_end",
-      },
       // Runs in the page's own MAIN world (Chrome 111+) so it can trigger
       // same-origin `<a download>` clicks against Telegram's blob/stream URLs.
       // This replaces manually creating a <script src> tag pointed at a
@@ -82,10 +79,4 @@ export const createManifest = (target: Target, dev = false) =>
     ],
     host_permissions: ["https://web.telegram.org/*", ...(PREMIUM_ENABLED ? [`${new URL(BACKEND_URL).origin}/*`] : [])],
     permissions: ["storage", "downloads", "downloads.open"],
-    web_accessible_resources: [
-      {
-        matches: ["https://web.telegram.org/*"],
-        resources: ["fonts/*"],
-      },
-    ],
   });

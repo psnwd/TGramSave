@@ -1,6 +1,9 @@
 import browser from "webextension-polyfill";
+import { catalogId } from "@/lib/catalog-id";
 import { waitForSelector } from "@/lib/dom-wait";
-import { hashTabUrl, hashValue } from "@/lib/md5";
+import { t } from "@/lib/i18n";
+import { hashTabUrl } from "@/lib/md5";
+import { trimCatalogList } from "@/lib/storage";
 import type { DownloadableItem } from "@/types/messages";
 
 export type TelegramVersion = "a" | "k";
@@ -19,11 +22,6 @@ interface VersionConfig {
   messageListSelectors: string[];
   /** Belt-and-suspenders: any candidate inside one of these regions is dropped even if it slipped through `messageListSelectors` (e.g. the right column hosts its own `.MessageList` for comment threads). */
   excludeRegionSelectors: string;
-  /** The media viewer (opened by clicking into a message's media) — used to page through a lazily-loaded album. */
-  mediaViewer: {
-    containerSelector: string;
-    nextButtonSelector: string;
-  };
 }
 
 const VERSION_CONFIG: Record<TelegramVersion, VersionConfig> = {
@@ -36,19 +34,11 @@ const VERSION_CONFIG: Record<TelegramVersion, VersionConfig> = {
       ".messages-container",
     ],
     excludeRegionSelectors: "#RightColumn, #LeftColumn, .LeftColumn, .RightColumn, .search-result, .SearchResults",
-    mediaViewer: {
-      containerSelector: ".MediaViewerSlide--active",
-      nextButtonSelector: ".MediaViewerActions .Button.smaller.round",
-    },
   },
   k: {
     messageRootSelectors: [".bubble[data-mid]", ".bubble", ".bubble-content-wrapper"],
     messageListSelectors: ["#column-center .bubbles", ".chat .bubbles", ".bubbles"],
     excludeRegionSelectors: "#column-left, #column-right, .sidebar-left, .sidebar-right, .chatlist, .search-super",
-    mediaViewer: {
-      containerSelector: ".media-viewer-movers",
-      nextButtonSelector: ".media-viewer-buttons .btn-icon",
-    },
   },
 };
 
@@ -150,38 +140,92 @@ export function isContextInvalidated(): boolean {
   return contextInvalidated;
 }
 
-/** Persists a discovered item into this chat's cataloged video list (read by the popup's Batch Download tab) and refreshes the toolbar badge. */
-async function catalogItem(item: DownloadableItem): Promise<void> {
-  if (contextInvalidated) return;
-  try {
-    const storageKey = `${hashTabUrl(window.location.href)}_video_list`;
-    const stored = await browser.storage.local.get(storageKey);
-    const list = (stored[storageKey] as Record<string, DownloadableItem> | undefined) ?? {};
-    list[item.videoId] = item;
-    await browser.storage.local.set({ [storageKey]: list });
-    await browser.runtime.sendMessage({ type: "videoCount", storageKey }).catch(() => undefined);
-  } catch (err) {
-    if (err instanceof Error && err.message.includes("Extension context invalidated")) {
-      contextInvalidated = true;
-      console.warn(
-        "[tgdl] extension was reloaded/updated — refresh this page to restore the media list/badge. Inline download buttons still work.",
-      );
-    } else {
-      console.error("[tgdl] failed to catalog item:", err);
-    }
-  }
-}
+/**
+ * Catalog writes are read-modify-write on a single storage entry. Album handling used to fire one of
+ * these per item without awaiting, so concurrent cycles overwrote each other and items vanished. Every
+ * write now goes through a per-storage-key promise queue, and one scan batches its items into one write.
+ */
+const catalogQueues = new Map<string, Promise<void>>();
 
 /**
- * `mid` (message id) is stable across re-renders; `src` (often `blob:...`) is not — Telegram can hand a
- * message's `<video>`/`<img>` a freshly-generated blob URL on remount (scroll, re-render, etc.) without
- * the message itself changing. Hashing `src` into the id therefore minted a *new* id every time that
- * happened, silently piling up duplicate entries in storage for what was really the same item. Keying on
- * `mid` + the item's position within the message is stable across those churns; a hash of `src` is only
- * the fallback for the rare case there's no `mid` to anchor to at all (e.g. a standalone media-viewer read).
+ * "Clear All" must survive the content script's next scan. The popup tells us which ids the user just
+ * cleared; we keep them suppressed for this page (new ids still catalog normally) until the chat
+ * changes or the user explicitly forces a re-scan.
  */
-function idFor(src: string, mid: string | undefined, index: number): string {
-  return mid ? `${mid}_${index}` : hashValue(src).slice(0, 12);
+const suppressedCatalogIds = new Set<string>();
+
+export function suppressCatalogIds(ids: string[]): void {
+  for (const id of ids) suppressedCatalogIds.add(id);
+}
+
+export function clearCatalogSuppression(): void {
+  suppressedCatalogIds.clear();
+}
+
+function enqueueCatalog(storageKey: string, task: () => Promise<void>): Promise<void> {
+  const previous = catalogQueues.get(storageKey) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(task);
+  catalogQueues.set(storageKey, next);
+  void next
+    .finally(() => {
+      if (catalogQueues.get(storageKey) === next) catalogQueues.delete(storageKey);
+    })
+    .catch(() => undefined);
+  return next;
+}
+
+/** Persists discovered items into this chat's cataloged list and refreshes the toolbar badge once per batch. */
+async function catalogItems(items: DownloadableItem[]): Promise<void> {
+  if (contextInvalidated) return;
+  const fresh = items.filter((item) => !suppressedCatalogIds.has(item.videoId));
+  if (fresh.length === 0) return;
+  const storageKey = `${hashTabUrl(window.location.href)}_video_list`;
+
+  await enqueueCatalog(storageKey, async () => {
+    try {
+      const stored = await browser.storage.local.get(storageKey);
+      const list = (stored[storageKey] as Record<string, DownloadableItem> | undefined) ?? {};
+      let changed = false;
+      for (const item of fresh) {
+        const previous = list[item.videoId];
+        if (
+          !previous ||
+          previous.videoUrl !== item.videoUrl ||
+          previous.kind !== item.kind ||
+          previous.thumbnailDataUrl !== item.thumbnailDataUrl
+        ) {
+          list[item.videoId] = item;
+          changed = true;
+        }
+      }
+      const trimmed = trimCatalogList(list);
+      if (!changed && !trimmed) return;
+
+      try {
+        await browser.storage.local.set({ [storageKey]: list });
+      } catch (err) {
+        // Quota is most often thumbnails; drop them for this chat and retry once.
+        if (!(err instanceof Error) || !/quota/i.test(err.message)) throw err;
+        for (const item of Object.values(list)) delete item.thumbnailDataUrl;
+        await browser.storage.local.set({ [storageKey]: list });
+        console.warn("[tgdl] storage quota reached — thumbnails dropped for this chat");
+      }
+      await browser.runtime.sendMessage({ type: "videoCount", storageKey }).catch(() => undefined);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Extension context invalidated")) {
+        contextInvalidated = true;
+        console.warn(
+          "[tgdl] extension was reloaded/updated — refresh this page to restore the media list/badge. Inline download buttons still work.",
+        );
+      } else {
+        console.error("[tgdl] failed to catalog items:", err);
+      }
+    }
+  });
+}
+
+function catalogItem(item: DownloadableItem): Promise<void> {
+  return catalogItems([item]);
 }
 
 const THUMB_SIZE = 64;
@@ -266,7 +310,7 @@ function isWebmOrSticker(el: HTMLVideoElement | HTMLImageElement): boolean {
   return Boolean(el.closest('[class*="sticker" i], [class*="gif" i], [class*="emoji" i]'));
 }
 
-/** Builds a `DownloadableItem` for one specific media element (used both for a single-media message and for each element inside a grouped/album message). `index` is this element's position among its message's media elements — see `idFor`. Pass `withThumbnail = false` to skip the canvas thumbnail capture — the expensive part — when the caller (e.g. the channel downloader, or a scroll-driven count) never renders one. */
+/** Builds a `DownloadableItem` for one specific media element (used both for a single-media message and for each element inside a grouped/album message). `index` is this element's position among its message's media elements - see `catalogId`. Pass `withThumbnail = false` to skip the canvas thumbnail capture - the expensive part — when the caller (e.g. the channel downloader, or a scroll-driven count) never renders one. */
 function buildItemFromElement(
   el: HTMLVideoElement | HTMLImageElement,
   wrapper: Element,
@@ -324,7 +368,7 @@ function buildItemFromElement(
     wrapper.closest("[data-mid], [data-message-id]")?.getAttribute("data-message-id") ??
     undefined;
 
-  const id = idFor(src, mid, index);
+  const id = catalogId(src, mid, index);
   const rawDur = el.tagName === "VIDEO" ? (el as HTMLVideoElement).duration : NaN;
   const durationSecs = Number.isFinite(rawDur) && rawDur > 0 ? rawDur : undefined;
 
@@ -384,6 +428,21 @@ const itemByContainer = new WeakMap<HTMLElement, DownloadableItem>();
 const processedClusterElements = new WeakSet<Element>();
 
 /**
+ * When inline buttons are disabled the popup still needs a catalog. Capture a thumbnail only the first
+ * time an id is seen (canvas `toDataURL` is the expensive part), and reset the cap occasionally so a very
+ * long session doesn't grow this set without bound.
+ */
+const catalogedThumbnails = new Set<string>();
+const MAX_CACHED_THUMBNAILS = 1000;
+
+function captureThumbnailOnce(item: DownloadableItem, el: HTMLVideoElement | HTMLImageElement): void {
+  if (item.thumbnailDataUrl || catalogedThumbnails.has(item.videoId)) return;
+  item.thumbnailDataUrl = captureThumbnail(el);
+  catalogedThumbnails.add(item.videoId);
+  if (catalogedThumbnails.size > MAX_CACHED_THUMBNAILS) catalogedThumbnails.clear();
+}
+
+/**
  * Places a full-width control directly under a message's media. The scan root is now `.Message` /
  * `.bubble` — a flex *row* (avatar column + content column), so appending a `width:100%` child straight
  * to it renders the control *beside* the media, not below it. Drop it into the bubble's own content
@@ -409,7 +468,7 @@ function injectSingleInlineButton(
       itemByContainer.set(existingContainer, item);
       void catalogItem(item);
       const button = existingContainer.querySelector("button");
-      if (button) button.textContent = item.kind === "image" ? "⬇ Download Image" : "⬇ Download Video";
+      if (button) button.textContent = item.kind === "image" ? t("inline.downloadImage") : t("inline.downloadVideo");
     }
     return;
   }
@@ -424,8 +483,8 @@ function injectSingleInlineButton(
   const button = document.createElement("button");
   button.type = "button";
   button.className = "downloadvideo";
-  button.textContent = item.kind === "image" ? "⬇ Download Image" : "⬇ Download Video";
-  button.title = "Download";
+  button.textContent = item.kind === "image" ? t("inline.downloadImage") : t("inline.downloadVideo");
+  button.title = t("inline.downloadTitle");
   styleDownloadButton(button);
   button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -444,6 +503,7 @@ function injectClusterButtons(
   onDownload: (item: DownloadableItem) => void,
   onDownloadAll: (items: DownloadableItem[]) => void,
 ): void {
+  const newItems: DownloadableItem[] = [];
   for (const { el, item } of found) {
     // Only touch storage/badge the first time we see each cluster element — this loop reran for every
     // album item on every 3s scan, firing a storage read+write+message each time.
@@ -451,7 +511,7 @@ function injectClusterButtons(
     processedClusterElements.add(el);
 
     item.thumbnailDataUrl ??= captureThumbnail(el);
-    void catalogItem(item);
+    newItems.push(item);
 
     const anchor = el.parentElement ?? el;
     if (getComputedStyle(anchor).position === "static") anchor.style.position = "relative";
@@ -460,7 +520,7 @@ function injectClusterButtons(
     button.type = "button";
     button.className = "downloadvideo tgdl-item-download";
     button.textContent = "⬇";
-    button.title = item.kind === "image" ? "Download Image" : "Download Video";
+    button.title = item.kind === "image" ? t("inline.downloadImage") : t("inline.downloadVideo");
     styleDownloadButton(button);
     button.style.cssText += "position:absolute;bottom:4px;right:4px;padding:2px 8px;margin:0;z-index:5;";
     button.addEventListener("click", (event) => {
@@ -472,12 +532,14 @@ function injectClusterButtons(
     anchor.appendChild(button);
   }
 
+  if (newItems.length > 0) void catalogItems(newItems);
+
   if (!wrapper.querySelector(".tgdl-cluster-download-all")) {
     const allButton = document.createElement("button");
     allButton.type = "button";
     allButton.className = "downloadvideo tgdl-cluster-download-all";
-    allButton.textContent = `⬇ Download all (${found.length})`;
-    allButton.title = "Download every item in this message";
+    allButton.textContent = t("inline.downloadAll", { n: found.length });
+    allButton.title = t("inline.downloadAll", { n: found.length });
     styleDownloadButton(allButton);
     allButton.style.cssText += "display:flex;width:100%;box-sizing:border-box;margin:6px 0;";
     allButton.addEventListener("click", (event) => {
@@ -500,6 +562,7 @@ export function injectMessageDownloadButtons(
   onDownloadAll: (items: DownloadableItem[]) => void,
   allowWebm: boolean,
   allowPreviews: boolean,
+  injectButtons = true,
 ): ScanResult {
   const roots = findMessageRoots(version);
   let mediaFound = 0;
@@ -510,6 +573,13 @@ export function injectMessageDownloadButtons(
     const found = extractAllMediaFromMessage(wrapper, allowWebm, false, allowPreviews);
     if (found.length === 0) continue;
     mediaFound += found.length;
+
+    // Catalog-only pass (inline buttons disabled): still populate the popup, but don't mutate the DOM.
+    if (!injectButtons) {
+      for (const { el, item } of found) captureThumbnailOnce(item, el);
+      void catalogItems(found.map((entry) => entry.item));
+      continue;
+    }
 
     if (found.length === 1) {
       injectSingleInlineButton(wrapper, found[0]!.el, found[0]!.item, onDownload);
@@ -526,85 +596,73 @@ export interface ScanResult {
   mediaFound: number;
 }
 
+let sharedMediaInjectionRunning = false;
+
 /**
- * Clicks through a lazily-loaded media album (opened via the viewer) so every
- * item gets rendered into the DOM at least once and cataloged. Bounded to
- * avoid an infinite loop if the "next" button never disables/disappears.
+ * a-version only: injects "Download all Media/Stories" + per-item buttons into the right-hand Shared
+ * Media panel. Guarded so a closed panel (or a slide that never mounts) can't leave overlapping
+ * MutationObservers behind — `waitForSelector` also times out now, but this avoids even starting the
+ * attempt every 3s while the panel is closed.
  */
-export async function catalogMediaAlbum(
-  version: TelegramVersion,
-  openViewerButton: HTMLElement,
-  maxItems = 200,
-): Promise<void> {
-  const { containerSelector, nextButtonSelector } = VERSION_CONFIG[version].mediaViewer;
-  openViewerButton.click();
-  await new Promise((r) => setTimeout(r, 2000));
-
-  for (let i = 0; i < maxItems; i++) {
-    const container = document.querySelector(containerSelector);
-    if (!container) break;
-
-    const item = extractMediaFromMessage(container);
-    if (item) await catalogItem(item);
-
-    const nextButton = document.querySelectorAll(nextButtonSelector)[1] as HTMLElement | undefined;
-    if (!nextButton) break;
-    nextButton.click();
-    await new Promise((r) => setTimeout(r, 1500));
-  }
-}
-
-/** a-version only: injects "Download all Media/Stories" + per-item buttons into the right-hand Shared Media panel. */
 export async function injectSharedMediaPanelButtons(
   onDownload: (items: DownloadableItem[]) => void,
   onDownloadOne: (item: DownloadableItem) => void,
   allowWebm: boolean,
 ): Promise<void> {
-  const slides = await waitForSelector("#RightColumn .shared-media .Transition_slide-active");
-  const slide = slides[0];
-  if (!slide || (!slide.className.includes("media-list") && !slide.className.includes("stories-list"))) return;
+  if (sharedMediaInjectionRunning || !document.querySelector("#RightColumn .shared-media")) return;
+  sharedMediaInjectionRunning = true;
 
-  const items = await waitForSelector("#RightColumn .shared-media .Transition_slide-active .scroll-item");
-  const panel = document.querySelector(".shared-media-transition")?.parentElement;
-  if (!panel) return;
+  try {
+    const slides = await waitForSelector("#RightColumn .shared-media .Transition_slide-active", { timeoutMs: 2500 });
+    const slide = slides[0];
+    if (!slide || (!slide.className.includes("media-list") && !slide.className.includes("stories-list"))) return;
 
-  if (!panel.querySelector(".tgdl-panel-download-all")) {
-    const bulkButton = document.createElement("button");
-    bulkButton.type = "button";
-    bulkButton.className = "tgdl-panel-download-all downloadvideo";
-    bulkButton.textContent = "⬇ Download all";
-    styleDownloadButton(bulkButton);
-    bulkButton.style.margin = "6px";
-    bulkButton.addEventListener("click", () => {
-      const found = items
-        .map((item) => extractMediaFromMessage(item, allowWebm))
-        .filter((x): x is DownloadableItem => Boolean(x));
-      onDownload(found);
+    const items = await waitForSelector("#RightColumn .shared-media .Transition_slide-active .scroll-item", {
+      timeoutMs: 2000,
     });
-    panel.appendChild(bulkButton);
-  }
+    const panel = document.querySelector(".shared-media-transition")?.parentElement;
+    if (!panel) return;
 
-  for (const item of items) {
-    if (item.querySelector(".tgdl-panel-download-one")) continue;
-    const media = extractMediaFromMessage(item, allowWebm);
-    if (!media) continue;
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "tgdl-panel-download-one downloadvideo";
-    button.textContent = "⬇";
-    styleDownloadButton(button);
-    button.style.position = "absolute";
-    button.style.bottom = "4px";
-    button.style.right = "4px";
-    button.style.padding = "2px 8px";
-    if (getComputedStyle(item).position === "static") {
-      (item as HTMLElement).style.position = "relative";
+    if (!panel.querySelector(".tgdl-panel-download-all")) {
+      const bulkButton = document.createElement("button");
+      bulkButton.type = "button";
+      bulkButton.className = "tgdl-panel-download-all downloadvideo";
+      bulkButton.textContent = t("inline.downloadAll", { n: items.length });
+      styleDownloadButton(bulkButton);
+      bulkButton.style.margin = "6px";
+      bulkButton.addEventListener("click", () => {
+        const found = items
+          .map((item) => extractMediaFromMessage(item, allowWebm))
+          .filter((x): x is DownloadableItem => Boolean(x));
+        onDownload(found);
+      });
+      panel.appendChild(bulkButton);
     }
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      onDownloadOne(media);
-    });
-    item.appendChild(button);
+
+    for (const item of items) {
+      if (item.querySelector(".tgdl-panel-download-one")) continue;
+      const media = extractMediaFromMessage(item, allowWebm);
+      if (!media) continue;
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "tgdl-panel-download-one downloadvideo";
+      button.textContent = "⬇";
+      styleDownloadButton(button);
+      button.style.position = "absolute";
+      button.style.bottom = "4px";
+      button.style.right = "4px";
+      button.style.padding = "2px 8px";
+      if (getComputedStyle(item).position === "static") {
+        (item as HTMLElement).style.position = "relative";
+      }
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        onDownloadOne(media);
+      });
+      item.appendChild(button);
+    }
+  } finally {
+    sharedMediaInjectionRunning = false;
   }
 }

@@ -238,3 +238,15 @@ body {
 .tgdl-list-item.is-selected {
   box-shadow: 0 0 0 2px var(--color-primary) inset;
 }
+
+/* Respect the OS reduced-motion setting for the segmented controls and spinners. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

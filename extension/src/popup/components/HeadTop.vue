@@ -3,12 +3,18 @@ import { computed } from "vue";
 import { Monitor, Moon, Sun } from "@lucide/vue";
 import type { ThemePreference } from "@/lib/storage";
 import { APP_NAME, ICON_SIZES } from "@/config";
+import { useI18n } from "../composables/useI18n";
 
 const props = defineProps<{ theme: ThemePreference }>();
 defineEmits<{ "cycle-theme": [] }>();
+const { t } = useI18n();
 
 const ICON = { light: Sun, dark: Moon, system: Monitor } as const;
-const LABEL: Record<ThemePreference, string> = { light: "Light theme", dark: "Dark theme", system: "System theme" };
+const LABEL = computed<Record<ThemePreference, string>>(() => ({
+  light: t("theme.light"),
+  dark: t("theme.dark"),
+  system: t("theme.system"),
+}));
 const icon = computed(() => ICON[props.theme]);
 </script>
 
@@ -16,7 +22,13 @@ const icon = computed(() => ICON[props.theme]);
   <div class="header">
     <img class="logo" :src="`/${ICON_SIZES[128]}`" :alt="APP_NAME" />
     <span class="title">{{ APP_NAME }}</span>
-    <button type="button" class="theme-toggle" :title="`${LABEL[theme]} — click to switch`" @click="$emit('cycle-theme')">
+    <button
+      type="button"
+      class="theme-toggle"
+      :title="`${LABEL[theme]} — click to switch`"
+      :aria-label="`${LABEL[theme]} — switch theme`"
+      @click="$emit('cycle-theme')"
+    >
       <component :is="icon" :size="16" />
     </button>
   </div>
