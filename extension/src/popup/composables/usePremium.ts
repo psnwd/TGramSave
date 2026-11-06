@@ -30,8 +30,8 @@ export function usePremium() {
     used,
     premium: computed(() => isPremium(state.value)),
     /** Re-sync with the backend (or claim by email), then reload local state. */
-    refresh: async (email?: string) => {
-      await refreshPremium(email);
+    refresh: async (email?: string, txn?: string) => {
+      await refreshPremium(email, txn);
       await load();
     },
     /** Reason this download isn't allowed, or null. Doesn't count usage; the content script does that. */

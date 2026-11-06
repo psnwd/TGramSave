@@ -1,0 +1,47 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report. Please do not include private Telegram content, tokens, or email addresses.
+  - type: input
+    id: version
+    attributes:
+      label: TGramSave version
+      placeholder: 1.1.1
+    validations:
+      required: true
+  - type: dropdown
+    id: browser
+    attributes:
+      label: Browser
+      options: [Chrome, Edge, Brave, Firefox, Other Chromium]
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: Telegram Web client
+      options: ["/a", "/k", "Both", "Not sure"]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Open ...\n2. Click ...\n3. See ..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+  - type: textarea
+    id: console
+    attributes:
+      label: Console output
+      description: Paste errors prefixed with `[tgdl]` from the page console and the extension's service worker console.
+      render: text

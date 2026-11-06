@@ -5,19 +5,21 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && bun run build:chrome && bun run build:firefox",
+    "build": "vue-tsc --noEmit && bun run build:chrome && bun run build:firefox && bun run verify:dist",
     "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:dist": "node scripts/check-dist.mjs",
     "lint": "biome lint .",
     "format": "biome format --write .",
     "check": "biome check .",
     "check:fix": "biome check --write .",
-    "ci": "biome ci . && bun run typecheck && bun run build",
+    "ci": "biome ci . && bun run typecheck && bun run test && bun run build",
     "build:chrome": "vite build --mode chrome",
-    "build:obf": "OBFUSCATE=1 vite build --mode chrome",
     "build:firefox": "vite build --mode firefox",
     "package:chrome": "bun run build:chrome && node scripts/package.mjs chrome",
     "package:firefox": "bun run build:firefox && node scripts/package.mjs firefox",
-    "package": "vue-tsc --noEmit && bun run package:chrome && bun run package:firefox"
+    "package": "vue-tsc --noEmit && bun run package:chrome && bun run package:firefox && bun run verify:dist"
   },
   "dependencies": {
     "@fontsource/inter": "^5.3.0",
@@ -35,10 +37,11 @@
     "@types/chrome": "^0.2.2",
     "@types/webextension-polyfill": "^0.12.5",
     "@vitejs/plugin-vue": "^6.0.8",
-    "javascript-obfuscator": "^5.9.0",
+    "happy-dom": "^21.0.4",
     "sharp": "^0.35.3",
     "typescript": "^5.9.3",
     "vite": "^6.4.3",
+    "vitest": "^5.1.0",
     "vue-tsc": "^3.3.8"
   }
 }

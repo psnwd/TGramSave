@@ -4,8 +4,17 @@
  */
 import browser from "webextension-polyfill";
 import { detectTelegramVersion, extractAllMediaFromMessage, findMessageRoots } from "@/content-script/catalog";
-import { clearCheckpoint, getCheckpoint, saveCheckpoint } from "@/lib/storage";
+import { t } from "@/lib/i18n";
+import {
+  areAllCapsReached,
+  dispatchedTotal as dispatchedTotalCount,
+  isDurationAllowed,
+  isKindCapReached,
+  type MediaKind,
+  type MediaTypeFlags,
+} from "@/lib/limits";
 import { gate } from "@/lib/premium";
+import { clearCheckpoint, getCheckpoint, saveCheckpoint } from "@/lib/storage";
 import type {
   ChannelDlCheckPageResponse,
   ChannelDlPeekResponse,
@@ -17,9 +26,6 @@ import type {
   VideoDownloadEventDetail,
 } from "@/types/messages";
 
-type MediaKind = "video" | "image" | "document";
-type MediaTypeFlags = Record<MediaKind, boolean>;
-const MEDIA_KINDS: readonly MediaKind[] = ["video", "image", "document"];
 const NO_LIMITS: ChannelDownloadLimits = { video: 0, image: 0, document: 0, total: 0 };
 
 /**
@@ -36,8 +42,13 @@ const STAGNANT_ROUNDS_TO_FINISH = 15; // rounds at top with no new URLs before w
 let running = false;
 let paused = false;
 let stopRequested = false;
+let stoppedByUser = false;
 let totalFound = 0;
 let totalDownloaded = 0;
+/** Items handed to the injector for ZIP archiving this run. */
+let totalQueuedForZip = 0;
+/** Aborts the in-flight wait/fetch when the user presses Stop. */
+let runAbort = new AbortController();
 let seenUrls = new Set<string>();
 let mediaTypes: MediaTypeFlags = { video: true, image: true, document: true };
 let limits: ChannelDownloadLimits = { ...NO_LIMITS };
@@ -94,6 +105,11 @@ function getChannelTitle(): string {
   );
 }
 
+/** Chat id from the URL hash (`#-100123_456` → `-100123`), stable across message selection. */
+function getChannelKey(): string {
+  return (window.location.hash.replace(/^#/, "").split("_")[0] ?? "").trim();
+}
+
 function kindOf(item: DownloadableItem): MediaKind {
   return item.kind === "image" || item.kind === "document" ? item.kind : "video";
 }
@@ -139,36 +155,32 @@ function normalizeLimits(raw: ChannelDownloadLimits | undefined): ChannelDownloa
 }
 
 function dispatchedTotal(): number {
-  return dispatchedByKind.video + dispatchedByKind.image + dispatchedByKind.document;
+  return dispatchedTotalCount(dispatchedByKind);
 }
 
 /** This kind can't take any more (its own cap, or the total cap, is full). */
 function kindCapReached(kind: MediaKind): boolean {
-  if (limits.total > 0 && dispatchedTotal() >= limits.total) return true;
-  return limits[kind] > 0 && dispatchedByKind[kind] >= limits[kind];
+  return isKindCapReached(limits, dispatchedByKind, kind);
 }
 
 /** Nothing left this run can do — the total cap is full, or every *selected* kind has hit its own cap. */
 function allCapsReached(): boolean {
-  if (limits.total > 0 && dispatchedTotal() >= limits.total) return true;
-  const selected = MEDIA_KINDS.filter((k) => mediaTypes[k]);
-  return selected.length > 0 && selected.every((k) => limits[k] > 0 && dispatchedByKind[k] >= limits[k]);
+  return areAllCapsReached(limits, dispatchedByKind, mediaTypes);
 }
 
-/** Returns false for videos that fall outside the configured duration range; always true for non-videos and for videos with unknown duration (undefined = include rather than skip). */
+/** Returns false for videos outside the configured duration range; unknown duration is included. */
 function isWithinDurationFilter(item: DownloadableItem): boolean {
   if (kindOf(item) !== "video") return true;
-  const dur = item.durationSecs;
-  if (dur === undefined || dur <= 0) return true; // unknown duration → include
-  if (minVideoSecs > 0 && dur < minVideoSecs) return false;
-  if (maxVideoSecs > 0 && dur > maxVideoSecs) return false;
-  return true;
+  return isDurationAllowed(item.durationSecs, minVideoSecs, maxVideoSecs);
 }
 
 /** Why (if at all) the scroll-and-download loop should stop this round. */
-function loopFinishReason(atTop: boolean, stagnantAtTop: number): string | null {
-  if (allCapsReached()) return "Download limit reached";
-  if (atTop && stagnantAtTop >= STAGNANT_ROUNDS_TO_FINISH) return "Reached start of channel";
+function loopFinishReason(
+  atTop: boolean,
+  stagnantAtTop: number,
+): "channel.status.limit" | "channel.status.reachedStart" | null {
+  if (allCapsReached()) return "channel.status.limit";
+  if (atTop && stagnantAtTop >= STAGNANT_ROUNDS_TO_FINISH) return "channel.status.reachedStart";
   return null;
 }
 
@@ -250,19 +262,32 @@ function dispatchToInjector(detail: VideoDownloadEventDetail): void {
  * The injector emits `<downloadId>_video_download_progress` CustomEvents on `document` as it fetches;
  * gating the next dispatch on this keeps channel downloads strictly sequential and gentle on the CDN.
  */
-function waitForInjectorDownload(downloadId: string): Promise<boolean> {
+function waitForInjectorDownload(downloadId: string, signal: AbortSignal): Promise<boolean> {
   return new Promise((resolve) => {
     const eventName = `${downloadId}_video_download_progress`;
+    const errorEvent = "tgdl_download_error";
+    let settled = false;
     const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
       document.removeEventListener(eventName, onProgress);
+      document.removeEventListener(errorEvent, onError);
+      signal.removeEventListener("abort", onAbort);
       clearTimeout(timer);
       resolve(ok);
     };
     const onProgress = (e: Event) => {
       if (((e as CustomEvent<{ progress: number }>).detail?.progress ?? 0) >= 100) finish(true);
     };
+    const onError = (e: Event) => {
+      if ((e as CustomEvent<{ downloadId?: string }>).detail?.downloadId === downloadId) finish(false);
+    };
+    const onAbort = () => finish(false);
     const timer = setTimeout(() => finish(false), DOWNLOAD_TIMEOUT_MS);
     document.addEventListener(eventName, onProgress);
+    document.addEventListener(errorEvent, onError);
+    if (signal.aborted) finish(false);
+    else signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -276,7 +301,7 @@ function flushZipBatch(folderName: string): void {
     zip: true,
     zipName: `${folderName.replaceAll("/", "_")}${suffix}.zip`,
   });
-  sendStatus(`Zipping part ${zipPartIndex} (${zipBatch.length} file(s))…`);
+  sendStatus(t("channel.status.zip", { part: zipPartIndex }));
   zipBatch = [];
 }
 
@@ -293,16 +318,26 @@ function maybeSaveCheckpoint(): void {
 async function dispatchDownload(item: DownloadableItem): Promise<void> {
   if (zipMode) {
     zipBatch.push(item);
-    sendStatus(`Queued for zip: ${item.kind ?? "media"} ${item.videoId}`);
+    totalQueuedForZip++;
+    sendStatus(t("channel.status.queued", { kind: item.kind ?? "media" }));
     if (zipBatchSize > 0 && zipBatch.length >= zipBatchSize) flushZipBatch(_zipFolderName);
     maybeSaveCheckpoint();
     return;
   }
   dispatchToInjector({ type: "single", item });
-  sendStatus(`Downloading ${totalDownloaded + 1}/${totalFound}: ${item.kind ?? "media"}`);
-  const ok = await waitForInjectorDownload(item.downloadId);
+  sendStatus(
+    t("channel.status.downloading", {
+      n: totalDownloaded + 1,
+      total: totalFound,
+      kind: item.kind ?? "media",
+    }),
+  );
+  const ok = await waitForInjectorDownload(item.downloadId, runAbort.signal);
   if (ok) totalDownloaded++;
-  else sendStatus(`⚠ Timed out on ${item.videoId} — moving on`);
+  else if (stopRequested) {
+    sendStatus(t("channel.status.stopping"));
+    return;
+  } else sendStatus(t("channel.status.timeout"));
   maybeSaveCheckpoint();
 }
 
@@ -340,16 +375,19 @@ function sendStatus(message: string, extra: { folder?: string; done?: boolean } 
 
 async function runChannelDownload(options: Partial<ChannelDownloadOptions> = {}): Promise<void> {
   if (running) {
-    sendStatus("Already running");
+    sendStatus(t("channel.status.already"));
     return;
   }
 
   running = true;
   paused = false;
   stopRequested = false;
+  stoppedByUser = false;
+  runAbort = new AbortController();
   seenUrls = new Set();
   totalFound = 0;
   totalDownloaded = 0;
+  totalQueuedForZip = 0;
   mediaTypes = {
     video: options.video !== false,
     image: options.image !== false,
@@ -364,7 +402,7 @@ async function runChannelDownload(options: Partial<ChannelDownloadOptions> = {})
   zipPartIndex = 0;
   zipBatch = [];
   checkpointEvery = options.checkpointEvery ?? 0;
-  channelKey = window.location.hash;
+  channelKey = getChannelKey();
 
   if (options.resume && channelKey) {
     const cp = await getCheckpoint(channelKey);
@@ -372,7 +410,7 @@ async function runChannelDownload(options: Partial<ChannelDownloadOptions> = {})
       seenUrls = new Set(cp.seenUrls);
       totalFound = cp.totalFound;
       totalDownloaded = cp.totalDownloaded;
-      sendStatus(`Resuming from checkpoint — ${totalDownloaded} already downloaded`);
+      sendStatus(t("channel.status.checkpoint", { n: totalDownloaded }));
     }
   }
   const saveFolder = options.folder ?? "";
@@ -381,7 +419,7 @@ async function runChannelDownload(options: Partial<ChannelDownloadOptions> = {})
   const folderName = (saveFolder ? `${safeName(saveFolder)}/` : "") + channelTitle;
   _zipFolderName = folderName;
 
-  sendStatus("Starting — jumping to newest message…", { folder: folderName });
+  sendStatus(t("channel.status.starting"), { folder: folderName });
 
   getScrollContainer().scrollTop = Number.MAX_SAFE_INTEGER; // start at the newest message
   await sleep(1500);
@@ -391,6 +429,7 @@ async function runChannelDownload(options: Partial<ChannelDownloadOptions> = {})
   // Re-acquire the scroller each round: Telegram's React can unmount and remount the scroll container,
   // leaving a stale ref with scrollTop === 0 forever, which triggers a false "Reached start" early exit.
   let stagnantAtTop = 0;
+  let finishMessage: "channel.status.limit" | "channel.status.reachedStart" | null = null;
 
   for (let round = 0; round < MAX_SCROLL_ROUNDS && !stopRequested; round++) {
     if (paused) {
@@ -408,7 +447,7 @@ async function runChannelDownload(options: Partial<ChannelDownloadOptions> = {})
 
     const finishReason = loopFinishReason(atTop, stagnantAtTop);
     if (finishReason) {
-      sendStatus(finishReason, { done: true });
+      finishMessage = finishReason;
       break;
     }
 
@@ -418,12 +457,24 @@ async function runChannelDownload(options: Partial<ChannelDownloadOptions> = {})
 
   finalizeZipIfNeeded(folderName);
 
+  const wasStopped = stoppedByUser || stopRequested;
   running = false;
   paused = false;
   stopRequested = false;
   lastPeekCount = -1; // let the scroll watcher push a fresh count again now that the run is over
-  if (channelKey) void clearCheckpoint(channelKey);
-  sendStatus(`Done! ${totalDownloaded} file(s) downloaded`, { done: true });
+
+  if (wasStopped) {
+    // Keep the checkpoint so Resume can continue where this run stopped.
+    sendStatus(t("channel.status.stopped"), { done: true });
+  } else {
+    if (channelKey) void clearCheckpoint(channelKey);
+    if (zipMode) {
+      sendStatus(t("channel.status.doneZip", { n: totalQueuedForZip, parts: zipPartIndex }), { done: true });
+    } else {
+      const suffix = finishMessage ? ` · ${t(finishMessage)}` : "";
+      sendStatus(`${t("channel.status.doneDownloads", { n: totalDownloaded })}${suffix}`, { done: true });
+    }
+  }
 }
 
 function finalizeZipIfNeeded(folderName: string): void {
@@ -432,81 +483,94 @@ function finalizeZipIfNeeded(folderName: string): void {
   flushZipBatch(folderName);
 }
 
-document.addEventListener("tgdl_zip_status", (e) => {
-  sendStatus((e as CustomEvent<{ message: string }>).detail.message);
-});
+/**
+ * Registers the channel feature's page listeners. Called once by the single isolated content-script
+ * entry so catalog/heavy modules are bundled once, and `save_file` has exactly one owner.
+ */
+export function registerChannelDownloader(): void {
+  document.addEventListener("tgdl_zip_status", (e) => {
+    sendStatus((e as CustomEvent<{ message: string }>).detail.message);
+  });
 
-// Route all saves through background so chrome.downloads.download({saveAs:false}) bypasses
-// the browser's "Ask where to save each file" setting. Covers both channel and popup downloads.
-document.addEventListener("tgdl_save_file", (e) => {
-  const { url, filename } = (e as CustomEvent<{ url: string; filename: string }>).detail;
-  void browser.runtime.sendMessage({ type: "save_file", url, filename });
-});
+  // Route all saves through background so chrome.downloads.download({saveAs:false}) bypasses
+  // the browser's "Ask where to save each file" setting. Covers both channel and popup downloads.
+  document.addEventListener("tgdl_save_file", (e) => {
+    const { url, filename } = (e as CustomEvent<{ url: string; filename: string }>).detail;
+    // Tell the MAIN-world downloader we exist, so it doesn't also fire the <a download> fallback.
+    document.dispatchEvent(new CustomEvent("tgdl_save_file_ack", { detail: { url } }));
+    void browser.runtime.sendMessage({ type: "save_file", url, filename });
+  });
 
-browser.runtime.onMessage.addListener((raw: unknown, _sender, sendResponse: (response: unknown) => void): true => {
-  const message = raw as ExtensionMessage;
+  browser.runtime.onMessage.addListener((raw: unknown, _sender, sendResponse: (response: unknown) => void): true => {
+    const message = raw as ExtensionMessage;
 
-  switch (message.type) {
-    case "channel_dl_start":
-      void gate("channel").then((ok) => {
-        if (ok) void runChannelDownload(message.options);
-      });
-      sendResponse({ ok: true });
-      break;
-    case "channel_dl_stop":
-      stopRequested = true;
-      running = false;
-      paused = false;
-      if (channelKey) void clearCheckpoint(channelKey);
-      sendStatus("Stopped by user", { done: true });
-      sendResponse({ ok: true });
-      break;
-    case "channel_dl_pause":
-      paused = true;
-      sendStatus("Paused");
-      sendResponse({ ok: true });
-      break;
-    case "channel_dl_resume":
-      paused = false;
-      sendStatus("Resuming…");
-      sendResponse({ ok: true });
-      break;
-    case "channel_dl_get_status": {
-      const response: ChannelDlStatusResponse = { running, paused, found: totalFound, downloaded: totalDownloaded };
-      sendResponse(response);
-      break;
+    switch (message.type) {
+      case "channel_dl_start":
+        void gate("channel").then((ok) => {
+          if (ok) void runChannelDownload(message.options);
+          else sendStatus(t("channel.status.premium"), { done: true });
+          sendResponse({ ok });
+        });
+        return true;
+      case "channel_dl_stop":
+        stoppedByUser = true;
+        stopRequested = true;
+        runAbort.abort();
+        document.dispatchEvent(new CustomEvent("tgdl_cancel_all"));
+        if (running) sendStatus(t("channel.status.stopping"));
+        else sendStatus(t("channel.status.stoppedByUser"), { done: true });
+        sendResponse({ ok: true });
+        break;
+      case "channel_dl_pause":
+        paused = true;
+        sendStatus(t("channel.status.paused"));
+        sendResponse({ ok: true });
+        break;
+      case "channel_dl_resume":
+        paused = false;
+        sendStatus(t("channel.status.resuming"));
+        sendResponse({ ok: true });
+        break;
+      case "channel_dl_get_status": {
+        const response: ChannelDlStatusResponse = { running, paused, found: totalFound, downloaded: totalDownloaded };
+        sendResponse(response);
+        break;
+      }
+      case "channel_dl_check_page": {
+        const response: ChannelDlCheckPageResponse = {
+          onTg: window.location.href.includes("web.telegram.org"),
+          version: detectTelegramVersion(),
+          channelTitle: getChannelTitle(),
+          channelKey: getChannelKey(),
+        };
+        sendResponse(response);
+        break;
+      }
+      case "channel_dl_peek": {
+        const response: ChannelDlPeekResponse = { found: countVisibleMedia(message.mediaTypes) };
+        sendResponse(response);
+        break;
+      }
+      case "channel_dl_watch":
+        startPeekWatch(message.mediaTypes);
+        sendResponse({ ok: true });
+        break;
+      case "channel_dl_unwatch":
+        stopPeekWatch();
+        sendResponse({ ok: true });
+        break;
+      case "channel_dl_open_panel":
+        injectFloatingPanel();
+        sendResponse({ ok: true });
+        break;
+      default:
+        // Not a channel message: don't keep the port open. `false` is the runtime contract, but the
+        // polyfill's callback type only models `true`, hence the cast.
+        return false as unknown as true;
     }
-    case "channel_dl_check_page": {
-      const response: ChannelDlCheckPageResponse = {
-        onTg: window.location.href.includes("web.telegram.org"),
-        version: detectTelegramVersion(),
-        channelTitle: getChannelTitle(),
-        channelKey: window.location.hash,
-      };
-      sendResponse(response);
-      break;
-    }
-    case "channel_dl_peek": {
-      const response: ChannelDlPeekResponse = { found: countVisibleMedia(message.mediaTypes) };
-      sendResponse(response);
-      break;
-    }
-    case "channel_dl_watch":
-      startPeekWatch(message.mediaTypes);
-      sendResponse({ ok: true });
-      break;
-    case "channel_dl_unwatch":
-      stopPeekWatch();
-      sendResponse({ ok: true });
-      break;
-    case "channel_dl_open_panel":
-      injectFloatingPanel();
-      break;
-    default:
-      break;
-  }
-  return true;
-});
+    return true;
+  });
+}
 
 /* ─── floating in-page control panel ────────────────────────────────────── */
 
@@ -517,28 +581,28 @@ function injectFloatingPanel(): void {
   panel.id = "tgdl-channel-panel";
   panel.innerHTML = `
     <div id="tgdl-panel-header">
-      <span>📥 Channel DL</span>
+      <span>${t("channel.panel.title")}</span>
       <button id="tgdl-panel-close" title="Close">✕</button>
     </div>
     <div id="tgdl-panel-body">
       <div class="tgdl-row">
-        <label>Save folder (optional)</label>
-        <input id="tgdl-folder" type="text" placeholder="e.g. TelegramMedia" />
+        <label>${t("channel.panel.saveFolder")}</label>
+        <input id="tgdl-folder" type="text" placeholder="${t("channel.saveFolderPlaceholder")}" />
       </div>
       <div class="tgdl-row tgdl-types">
-        <label><input type="checkbox" id="tgdl-chk-video" checked /> Videos</label>
-        <label><input type="checkbox" id="tgdl-chk-image" checked /> Images</label>
-        <label><input type="checkbox" id="tgdl-chk-doc" /> Documents</label>
+        <label><input type="checkbox" id="tgdl-chk-video" checked /> ${t("channel.videos")}</label>
+        <label><input type="checkbox" id="tgdl-chk-image" checked /> ${t("channel.images")}</label>
+        <label><input type="checkbox" id="tgdl-chk-doc" /> ${t("channel.documents")}</label>
       </div>
       <div class="tgdl-row tgdl-btns">
-        <button id="tgdl-start-btn">▶ Start</button>
-        <button id="tgdl-pause-btn" disabled>⏸ Pause</button>
-        <button id="tgdl-stop-btn" disabled>■ Stop</button>
+        <button id="tgdl-start-btn">${t("channel.panel.start")}</button>
+        <button id="tgdl-pause-btn" disabled>${t("channel.panel.pause")}</button>
+        <button id="tgdl-stop-btn" disabled>${t("channel.panel.stop")}</button>
       </div>
       <div id="tgdl-progress">
-        <span id="tgdl-status-text">Ready</span>
+        <span id="tgdl-status-text">${t("channel.panel.ready")}</span>
         <div id="tgdl-counts">
-          Found: <b id="tgdl-found">0</b> &nbsp;|&nbsp; Downloaded: <b id="tgdl-dled">0</b>
+          ${t("channel.panel.found")} <b id="tgdl-found">0</b> &nbsp;|&nbsp; ${t("channel.panel.downloaded")} <b id="tgdl-dled">0</b>
         </div>
       </div>
     </div>
@@ -599,7 +663,7 @@ function injectFloatingPanel(): void {
     const image = panel.querySelector<HTMLInputElement>("#tgdl-chk-image")!.checked;
     const doc = panel.querySelector<HTMLInputElement>("#tgdl-chk-doc")!.checked;
     if (!video && !image && !doc) {
-      panel.querySelector("#tgdl-status-text")!.textContent = "⚠ Select at least one media type";
+      panel.querySelector("#tgdl-status-text")!.textContent = t("channel.selectMediaType");
       return;
     }
     panel.querySelector<HTMLButtonElement>("#tgdl-start-btn")!.disabled = true;
@@ -612,10 +676,10 @@ function injectFloatingPanel(): void {
     const btn = panel.querySelector<HTMLButtonElement>("#tgdl-pause-btn")!;
     if (paused) {
       paused = false;
-      btn.textContent = "⏸ Pause";
+      btn.textContent = t("channel.panel.pause");
     } else {
       paused = true;
-      btn.textContent = "▶ Resume";
+      btn.textContent = t("channel.resume");
     }
   });
 
@@ -625,7 +689,7 @@ function injectFloatingPanel(): void {
     panel.querySelector<HTMLButtonElement>("#tgdl-pause-btn")!.disabled = true;
     panel.querySelector<HTMLButtonElement>("#tgdl-stop-btn")!.disabled = true;
     panel.querySelector<HTMLButtonElement>("#tgdl-start-btn")!.disabled = false;
-    panel.querySelector("#tgdl-status-text")!.textContent = "Stopping…";
+    panel.querySelector("#tgdl-status-text")!.textContent = t("channel.panel.stopping");
   });
 }
 
@@ -642,7 +706,7 @@ function updateFloatingPanel(message: string): void {
     if (startBtn) startBtn.disabled = false;
     if (pauseBtn) {
       pauseBtn.disabled = true;
-      pauseBtn.textContent = "⏸ Pause";
+      pauseBtn.textContent = t("channel.panel.pause");
     }
     if (stopBtn) stopBtn.disabled = true;
   }

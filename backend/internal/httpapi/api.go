@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +20,24 @@ import (
 	"tgramsave/backend/internal/store"
 )
 
+type stats struct {
+	registers    atomic.Int64
+	claims       atomic.Int64
+	webhooks     atomic.Int64
+	unauthorized atomic.Int64
+	rateLimited  atomic.Int64
+}
+
+func (s *stats) snapshot() gin.H {
+	return gin.H{
+		"registers":    s.registers.Load(),
+		"claims":       s.claims.Load(),
+		"webhooks":     s.webhooks.Load(),
+		"unauthorized": s.unauthorized.Load(),
+		"rateLimited":  s.rateLimited.Load(),
+	}
+}
+
 type API struct {
 	cfg    config.Config
 	store  *store.Store
@@ -25,19 +45,37 @@ type API struct {
 	claim  *limiter // /v1/claim
 	hook   *limiter // /webhooks/kofi, per IP: stops token guessing
 	badAdm *limiter // failed /admin attempts, per IP
+	stats  *stats
 }
 
 func New(cfg config.Config, s *store.Store) http.Handler {
-	a := &API{cfg, s, newLimiter(10, time.Hour), newLimiter(10, time.Hour), newLimiter(120, time.Hour), newLimiter(10, 15*time.Minute)}
+	a := &API{
+		cfg:    cfg,
+		store:  s,
+		reg:    newLimiter(10, time.Hour),
+		claim:  newLimiter(10, time.Hour),
+		hook:   newLimiter(120, time.Hour),
+		badAdm: newLimiter(10, 15*time.Minute),
+		stats:  &stats{},
+	}
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Recovery(), securityHeaders)
+	r.Use(gin.Recovery(), securityHeaders, requestLog())
 	// Only trust the client-IP header the platform sets (Fly-Client-IP etc.); otherwise RemoteAddr. Never raw X-Forwarded-For.
 	r.SetTrustedProxies(nil)
 	r.TrustedPlatform = cfg.ClientIPHeader
 	r.HandleMethodNotAllowed = true
 
 	r.GET("/healthz", func(c *gin.Context) { c.String(200, "ok") })
+	r.GET("/readyz", func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.Ping(ctx); err != nil {
+			c.String(http.StatusServiceUnavailable, "not ready")
+			return
+		}
+		c.String(200, "ready")
+	})
 	r.GET("/v1/plans", a.plans)
 	r.POST("/v1/register", a.register)
 	r.GET("/v1/status", a.auth(a.status))
@@ -48,8 +86,20 @@ func New(cfg config.Config, s *store.Store) http.Handler {
 		adm.GET("/plans", a.adminList)
 		adm.PUT("/plans/:key", a.adminPut)
 		adm.DELETE("/plans/:key", a.adminDelete)
+		adm.GET("/metrics", func(c *gin.Context) { c.JSON(200, a.stats.snapshot()) })
 	}
 	return r
+}
+
+// requestLog is deliberately minimal: method, path, status and latency. Never logs query strings or
+// bodies (Ko-fi payloads contain emails).
+func requestLog() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		log.Printf("%s %s -> %d (%s)", c.Request.Method, c.Request.URL.Path, c.Writer.Status(),
+			time.Since(start).Round(time.Millisecond))
+	}
 }
 
 // --- helpers ---
@@ -80,10 +130,11 @@ func bearer(c *gin.Context) string {
 	return strings.TrimSpace(t)
 }
 
-func limit(c *gin.Context, l *limiter) bool {
+func (a *API) limit(c *gin.Context, l *limiter) bool {
 	if l.allow(c.ClientIP()) {
 		return true
 	}
+	a.stats.rateLimited.Add(1)
 	deny(c, http.StatusTooManyRequests, "too many requests")
 	return false
 }
@@ -161,6 +212,7 @@ func (a *API) auth(h func(*gin.Context, *store.Install)) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tok := bearer(c)
 		if tok == "" {
+			a.stats.unauthorized.Add(1)
 			deny(c, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -168,6 +220,7 @@ func (a *API) auth(h func(*gin.Context, *store.Install)) gin.HandlerFunc {
 		if err != nil {
 			fail(c, err)
 		} else if i == nil {
+			a.stats.unauthorized.Add(1)
 			deny(c, http.StatusUnauthorized, "unauthorized")
 		} else {
 			h(c, i)
@@ -185,7 +238,7 @@ func (a *API) plans(c *gin.Context) {
 }
 
 func (a *API) register(c *gin.Context) {
-	if !limit(c, a.reg) {
+	if !a.limit(c, a.reg) {
 		return
 	}
 	id, secret, code, err := a.store.CreateInstall()
@@ -193,22 +246,34 @@ func (a *API) register(c *gin.Context) {
 		fail(c, err)
 		return
 	}
+	a.stats.registers.Add(1)
 	c.JSON(201, gin.H{"id": id, "secret": secret, "code": code})
 }
 
 func (a *API) status(c *gin.Context, i *store.Install) { c.JSON(200, status(i)) }
 
 func (a *API) claimEmail(c *gin.Context, i *store.Install) {
-	if !limit(c, a.claim) {
+	if !a.limit(c, a.claim) {
 		return
 	}
-	var body struct{ Email string }
+	var body struct {
+		Email string `json:"email"`
+		Txn   string `json:"txn"`
+	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
 	if c.ShouldBindJSON(&body) != nil || !validEmail(body.Email) {
 		c.String(http.StatusBadRequest, "valid email required")
 		return
 	}
-	if err := a.store.Claim(i.ID, body.Email); err != nil {
+	if body.Txn == "" && !a.cfg.AllowEmailClaim {
+		c.String(http.StatusBadRequest, "ko-fi transaction id required")
+		return
+	}
+	if err := a.store.Claim(i.ID, body.Email, body.Txn, a.cfg.AllowEmailClaim); err != nil {
+		if errors.Is(err, store.ErrProofRequired) {
+			c.String(http.StatusBadRequest, "ko-fi transaction id required")
+			return
+		}
 		fail(c, err)
 		return
 	}
@@ -217,6 +282,7 @@ func (a *API) claimEmail(c *gin.Context, i *store.Install) {
 		fail(c, err)
 		return
 	}
+	a.stats.claims.Add(1)
 	c.JSON(200, status(i))
 }
 
@@ -230,7 +296,7 @@ func validEmail(e string) bool {
 var codeRe = regexp.MustCompile(`TGS-[A-Z0-9]{4}-[A-Z0-9]{4}`)
 
 func (a *API) kofi(c *gin.Context) {
-	if !limit(c, a.hook) {
+	if !a.limit(c, a.hook) {
 		return
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
@@ -280,6 +346,7 @@ func (a *API) kofi(c *gin.Context) {
 		fail(c, err) // 500 makes Ko-fi retry; replays are idempotent
 		return
 	}
+	a.stats.webhooks.Add(1)
 	c.Status(http.StatusOK)
 }
 
@@ -293,6 +360,7 @@ func (a *API) admin(c *gin.Context) {
 	}
 	if subtle.ConstantTimeCompare([]byte(bearer(c)), []byte(a.cfg.AdminToken)) != 1 {
 		a.badAdm.allow(ip) // records the failure
+		a.stats.unauthorized.Add(1)
 		deny(c, http.StatusUnauthorized, "unauthorized")
 	}
 }

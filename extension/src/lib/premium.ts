@@ -1,5 +1,9 @@
 import browser from "webextension-polyfill";
 import { BACKEND_URL, FREE_DAILY_LIMIT, PREMIUM_ENABLED } from "@/config";
+import { t } from "./i18n";
+import { type DownloadKind, denyReasonKey } from "./premium-rules";
+
+export type { DownloadKind } from "./premium-rules";
 
 export interface PremiumState {
   secret: string;
@@ -19,9 +23,6 @@ export interface Plan {
   days: number;
 }
 
-/** What a download needs: a lone file, a batch/ZIP, or a whole-channel run. */
-export type DownloadKind = "single" | "batch" | "channel";
-
 const KEY = "premium";
 const USAGE = "usage";
 const STALE_MS = 60 * 60 * 1000;
@@ -40,6 +41,8 @@ type Status = Pick<PremiumState, "code" | "tier" | "expiresAt" | "lifetime">;
 async function api<T>(path: string, init: RequestInit = {}, secret?: string): Promise<T> {
   const res = await fetch(BACKEND_URL + path, {
     ...init,
+    cache: "no-store",
+    signal: AbortSignal.timeout(10_000),
     headers: { "Content-Type": "application/json", ...(secret ? { Authorization: `Bearer ${secret}` } : {}) },
   });
   if (!res.ok) throw Object.assign(new Error(`${path} ${res.status}`), { status: res.status });
@@ -58,7 +61,7 @@ const save = async (s: PremiumState) => {
  * Network code is for the background/popup only: content scripts can't fetch cross-origin, they message the background.
  * The Web Lock stops popup + background registering two installs at once.
  */
-export async function refreshPremium(email?: string): Promise<PremiumState | undefined> {
+export async function refreshPremium(email?: string, txn?: string): Promise<PremiumState | undefined> {
   if (!PREMIUM_ENABLED) return undefined;
   return await navigator.locks.request("tgs-premium", async () => {
     let s = await getPremium();
@@ -75,7 +78,7 @@ export async function refreshPremium(email?: string): Promise<PremiumState | und
         });
       }
       const st = email
-        ? await api<Status>("/v1/claim", { method: "POST", body: JSON.stringify({ email }) }, s.secret)
+        ? await api<Status>("/v1/claim", { method: "POST", body: JSON.stringify({ email, txn }) }, s.secret)
         : await api<Status>("/v1/status", {}, s.secret);
       return await save({ ...s, ...st, checkedAt: Date.now() });
     } catch (e) {
@@ -98,12 +101,8 @@ export async function usedToday(): Promise<number> {
 
 /** Why this download is not allowed, or null. Pure, so the popup can pre-check without counting. */
 export function denyReason(s: PremiumState | undefined, used: number, kind: DownloadKind): string | null {
-  if (isPremium(s)) return null;
-  if (kind === "channel") return "Channel download is a Premium feature.";
-  if (kind === "batch") return "Batch & ZIP downloads are a Premium feature.";
-  if (used >= FREE_DAILY_LIMIT)
-    return `Free limit reached (${FREE_DAILY_LIMIT}/day). Go Premium for unlimited downloads.`;
-  return null;
+  const key = denyReasonKey(isPremium(s), used, kind, FREE_DAILY_LIMIT);
+  return key ? t(key, { limit: FREE_DAILY_LIMIT }) : null;
 }
 
 function toast(msg: string): void {

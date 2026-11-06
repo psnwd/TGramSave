@@ -5,8 +5,9 @@ export type ExtensionMessage =
   | { type: "clearVideoCount" }
   // content-script -> background: re-sync premium tier (content scripts can't fetch the backend cross-origin)
   | { type: "premium_refresh" }
-  // content-script -> popup (relayed download progress, only for page:"popup" items)
+  // content-script -> popup (relayed download progress/errors for popup items)
   | { type: "downloadProgress"; downloadId: string; progress: number }
+  | { type: "downloadError"; downloadId: string; message: string }
   // content-script-inject (MAIN world) -> background (via channel-downloader relay): trigger a download bypassing the browser "Ask where to save" dialog
   | { type: "save_file"; url: string; filename: string }
   // popup <-> content-script ("Download" tab, single/batch/force)
@@ -25,6 +26,10 @@ export type ExtensionMessage =
       zipName?: string;
     }
   | { type: "forceDownloadPopup" }
+  /** popup -> content: keep these ids out of the catalog until the chat changes or a forced rescan. */
+  | { type: "catalog_suppress"; ids: string[] }
+  /** popup -> content: abort every in-flight batch download. */
+  | { type: "cancelDownloads" }
   // popup <-> content-script/channel-downloader ("📡 Channel" tab)
   | { type: "channel_dl_start"; options: ChannelDownloadOptions }
   | { type: "channel_dl_stop" }

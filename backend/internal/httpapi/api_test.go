@@ -17,7 +17,7 @@ import (
 func setup(t *testing.T) http.Handler {
 	dsn := filepath.Join(t.TempDir(), "t.db")
 	if u := os.Getenv("TEST_DATABASE_URL"); u != "" { // run the suite against Postgres; tables are dropped first
-		store.Reset(u)
+		store.ResetForTests(u)
 		dsn = u
 	}
 	s, err := store.Open(dsn)
@@ -90,15 +90,18 @@ func TestFlow(t *testing.T) {
 func TestClaimAndAdmin(t *testing.T) {
 	h := setup(t)
 	// pay before any install knows the email, no code
-	kofi(h, `{"verification_token":"ktok","message_id":"m1","email":"b@x.com","shop_items":[{"direct_link_code":"quarterly"}]}`)
+	kofi(h, `{"verification_token":"ktok","message_id":"m1","kofi_transaction_id":"t1","email":"b@x.com","shop_items":[{"direct_link_code":"quarterly"}]}`)
 	var reg map[string]string
 	json.Unmarshal(do(h, "POST", "/v1/register", "", "", false).Body.Bytes(), &reg)
 	if statusOf(t, h, reg["secret"]).Tier != "free" {
 		t.Fatal("unclaimed should be free")
 	}
-	do(h, "POST", "/v1/claim", reg["secret"], `{"email":"B@x.com"}`, false)
+	if do(h, "POST", "/v1/claim", reg["secret"], `{"email":"B@x.com"}`, false).Code != 400 {
+		t.Fatal("email-only claim must be rejected without proof")
+	}
+	do(h, "POST", "/v1/claim", reg["secret"], `{"email":"B@x.com","txn":"t1"}`, false)
 	if statusOf(t, h, reg["secret"]).Tier != "premium" {
-		t.Fatal("claim should activate")
+		t.Fatal("claim with transaction id should activate")
 	}
 
 	// admin: token required, edit price, change days, public list reflects it
@@ -125,6 +128,12 @@ func TestHardening(t *testing.T) {
 	w := do(h, "GET", "/healthz", "", "", false)
 	if w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Strict-Transport-Security") == "" {
 		t.Fatal("security headers missing")
+	}
+	if do(h, "GET", "/readyz", "", "", false).Code != 200 {
+		t.Fatal("readyz should report the database reachable")
+	}
+	if do(h, "GET", "/admin/metrics", "adm", "", false).Code != 200 {
+		t.Fatal("admin metrics should be readable")
 	}
 	var reg map[string]string
 	json.Unmarshal(do(h, "POST", "/v1/register", "", "", false).Body.Bytes(), &reg)
