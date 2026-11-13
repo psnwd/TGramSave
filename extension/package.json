@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@fontsource/inter": "^5.3.0",
-    "@lucide/vue": "^1.27.0",
+    "@lucide/vue": "^1.71.0",
     "blueimp-md5": "^2.19.0",
     "element-plus": "^2.14.7",
     "fflate": "^0.8.3",
